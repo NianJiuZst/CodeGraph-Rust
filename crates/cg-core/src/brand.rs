@@ -17,7 +17,7 @@ pub const UPSTREAM_CONFIG_FILE: &str = "codegraph.json";
 pub const CONFIG_FILE: &str = "cgr.json";
 /// Version of the resolution rules: changing resolver behaviour bumps this, which
 /// marks older indexes as "built by an older engine" (design doc 5.8).
-pub const ENGINE_VERSION: u32 = 11;
+pub const ENGINE_VERSION: u32 = 12;
 /// Version of the on-disk segment format; a mismatch forces a full rebuild.
 pub const FORMAT_VERSION: u32 = 2;
 /// The upstream commit whose kernel is vendored (see crates/cg-kernel/UPSTREAM_COMMIT).

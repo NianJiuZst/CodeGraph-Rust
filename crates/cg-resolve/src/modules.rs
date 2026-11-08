@@ -1,7 +1,7 @@
 //! Module and package indexes (design doc 6.2 `ModuleIndex`) and import-specifier resolution
 //! for every MVP language. Built once per run from the file list and the project manifests.
 
-use crate::project::{normalize, parent_dir, ProjectInfo};
+use crate::project::{normalize, parent_dir, path_affinity, ProjectInfo};
 use cg_core::{FileId, Lang, LangFamily, NodeIdx, NONE};
 use cg_extract::BindKind;
 use cg_store::View;
@@ -323,7 +323,7 @@ impl<'v> Modules<'v> {
             LangFamily::Js => self.resolve_js(spec, from_path, lang),
             LangFamily::Python => self.resolve_python(spec, from_path),
             LangFamily::Go => self.resolve_go(spec, from_path),
-            LangFamily::Jvm => self.resolve_jvm(spec),
+            LangFamily::Jvm => self.resolve_jvm(spec, from_path),
             LangFamily::Rust => self.resolve_rust(spec, from),
             LangFamily::C => self.resolve_c(spec, from_path),
             LangFamily::CSharp => self.resolve_csharp(spec),
@@ -710,11 +710,13 @@ impl<'v> Modules<'v> {
     }
 
     // ---- Java / Kotlin
-    fn resolve_jvm(&self, spec: &str) -> ImportTarget {
+    fn resolve_jvm(&self, spec: &str, from_path: &str) -> ImportTarget {
         let segs: Vec<&str> = spec.split('.').collect();
         for i in (1..segs.len()).rev() {
             let qname = format!("{}::{}", segs[..i].join("."), segs[i..].join("::"));
-            if let Some(n) = self.view.by_qname(&qname).next() {
+            // one class copied into several source roots: the importer's own root
+            let affinity = |n: &NodeIdx| (path_affinity(self.view.file(self.view.hot(*n).file).path(), from_path), std::cmp::Reverse(n.0));
+            if let Some(n) = self.view.by_qname(&qname).max_by_key(affinity) {
                 return ImportTarget::Node(n);
             }
         }
@@ -744,6 +746,25 @@ impl<'v> Modules<'v> {
     /// The longest module prefix and the number of trailing declaration/member
     /// segments. Returning the tail prevents `crate::api::Type` being mistaken
     /// for the module itself when resolving a qualified type or return value.
+    /// `mod support { pub mod panic; }` in a crate root such as `tests/sync_panic.rs`:
+    /// the inline module's out-of-line children live under the root's own directory
+    /// (`tests/support/panic.rs`). Only existing files count, longest path first.
+    fn inline_mod_file(&self, from: FileId, modpath: &str, segs: &[&str]) -> Option<(ImportTarget, usize)> {
+        if !modpath.is_empty() {
+            return None;
+        }
+        let dir = dir_of(self.path_of(from));
+        for k in (1..=segs.len()).rev() {
+            let base = if dir.is_empty() { segs[..k].join("/") } else { format!("{dir}/{}", segs[..k].join("/")) };
+            for path in [format!("{base}.rs"), format!("{base}/mod.rs")] {
+                if let Some(f) = self.path_to_file.get(path.as_str()) {
+                    return Some((ImportTarget::File(*f), segs.len() - k));
+                }
+            }
+        }
+        None
+    }
+
     pub fn resolve_rust_path(&self, spec: &str, from: FileId) -> (ImportTarget, usize) {
         let Some((crate_idx, modpath)) = self.rs_file_mod.get(&from) else { return (ImportTarget::External, 0) };
         let segs: Vec<&str> = spec.split("::").filter(|s| !s.is_empty()).collect();
@@ -773,6 +794,8 @@ impl<'v> Modules<'v> {
                         let mut full: Vec<String> = modpath.split("::").filter(|s| !s.is_empty()).map(str::to_owned).collect();
                         full.extend(segs.iter().map(|s| s.to_string()));
                         (*crate_idx, full)
+                    } else if let Some(found) = self.inline_mod_file(from, modpath, &segs) {
+                        return found;
                     } else {
                         return (ImportTarget::External, 0);
                     }
