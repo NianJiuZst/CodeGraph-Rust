@@ -1766,6 +1766,14 @@ impl<'e, 'v> FileCx<'e, 'v> {
                     let pick = args.and_then(|(a, r)| self.pick_overload(wcx, &best, a, r)).unwrap_or(best[0]);
                     return NameRes::Found(pick, by::PACKAGE, 80);
                 }
+                // one declaration copied into several source roots; only JVM qualified
+                // names carry the package, so equal names elsewhere are distinct symbols
+                let q0 = self.view.node(best[0]).qname();
+                if self.family == LangFamily::Jvm && best.iter().all(|c| self.view.node(*c).qname() == q0) {
+                    if let Some(n) = self.nearest_copy(&best) {
+                        return NameRes::Found(n, by::PACKAGE, 80);
+                    }
+                }
                 if self.lang == Lang::Cpp {
                     // a name written alone is no class's member while something else answers it
                     let view = self.view;
@@ -1782,6 +1790,16 @@ impl<'e, 'v> FileCx<'e, 'v> {
                 NameRes::Ambiguous(k as u32)
             }
         }
+    }
+
+    /// The candidate in this file's own source root: the only one nearest it by directory
+    /// distance.
+    fn nearest_copy(&self, cands: &[NodeIdx]) -> Option<NodeIdx> {
+        let affinity = |n: NodeIdx| crate::project::path_affinity(self.view.file(self.view.hot(n).file).path(), self.path);
+        let best = cands.iter().map(|n| affinity(*n)).max()?;
+        let mut top = cands.iter().copied().filter(|n| affinity(*n) == best);
+        let first = top.next()?;
+        top.next().is_none().then_some(first)
     }
 
     /// C / C++: a macro invocation is not a call (upstream keeps macros out of the call graph).
@@ -1980,6 +1998,14 @@ impl<'e, 'v> FileCx<'e, 'v> {
 
     /// Swift `guard let request = request(for: task)`: the name a declaration binds is not in
     /// scope in its own initializer, so the call there is to the method of that name.
+    /// `let rt = rt();` / `copy = self.copy()`: an initializer cannot see the local it
+    /// declares, so a call of that name on its line is not a call of the local. Only a local
+    /// initialised by a call of this very name, so `[f() for f in fs]` keeps its `f`.
+    fn self_init_call(&self, b: &BindingRec, name: &str, line: u32) -> bool {
+        let callee = self.view.text_str(b.init_ctor).split('(').next().unwrap_or("");
+        b.kind == BindKind::Local as u8 && b.line == line && callee.rsplit(['.', ':']).next() == Some(name)
+    }
+
     fn swift_self_init(&self, b: &BindingRec, name: &str, line: u32) -> bool {
         self.family == LangFamily::Swift && b.line == line && self.view.text_str(b.init_ctor).strip_suffix("()") == Some(name)
     }
@@ -2045,7 +2071,13 @@ impl<'e, 'v> FileCx<'e, 'v> {
         let e = self.e;
         // 2. lexical scope
         if accept != Accept::Type {
-            if let Some(b) = self.lookup_binding(name, scope, line, false).filter(|b| !self.is_cpp_alias(b, name) && !self.swift_self_init(b, name, line)) {
+            let mut found = self.lookup_binding(name, scope, line, false);
+            // the local this line declares is not yet in scope: an earlier binding (a callable
+            // parameter in `default = default()`) still is
+            if accept == Accept::Callable && found.is_some_and(|b| self.self_init_call(b, name, line)) {
+                found = self.lookup_binding(name, scope, line.saturating_sub(1), false);
+            }
+            if let Some(b) = found.filter(|b| !self.is_cpp_alias(b, name) && !self.swift_self_init(b, name, line)) {
                 if b.kind == BindKind::Alias as u8 {
                     return self.follow_alias(wcx, b, accept, from, allow_global, args);
                 }
@@ -2148,8 +2180,8 @@ impl<'e, 'v> FileCx<'e, 'v> {
         if self.pkg.0 != NONE {
             if let Some(list) = e.pkg_defs.get(self.pkg.0 as usize).and_then(|m| m.get(name)) {
                 let hits: SmallVec<[NodeIdx; 2]> = list.iter().copied().filter(|n| accept.ok(kind_of(view, *n)) && view.hot(*n).file != self.file).collect();
-                if let Some(n) = hits.first() {
-                    return NameRes::Found(*n, by::PACKAGE, 85);
+                if let Some(n) = self.nearest_copy(&hits).or_else(|| hits.first().copied()) {
+                    return NameRes::Found(n, by::PACKAGE, 85);
                 }
             }
         }
@@ -3620,6 +3652,13 @@ impl<'e, 'v> FileCx<'e, 'v> {
         let name = self.view.text_str(r.name);
         let Some(kind) = RefKind::from_wire(r.kind) else { return Outcome::st(status::NO_CANDIDATE) };
         let o = self.resolve_kind(wcx, r, name, kind);
+        // a name-only guess for an untyped receiver is never the caller itself:
+        // `std.sync_all()` inside `File::sync_all` calls the std file's method (dynamic
+        // languages do recurse through untyped children: `child.relabel(..)`)
+        let typed = matches!(self.family, LangFamily::Rust | LangFamily::Jvm | LangFamily::Go);
+        if typed && kind == RefKind::Edge(EdgeKind::Calls) && o.status == status::RESOLVED && o.by == by::GLOBAL && o.target == r.from.0 {
+            return Outcome::st(status::NO_CANDIDATE);
+        }
         if o.status == status::LOCAL_BINDING && matches!(kind, RefKind::Edge(EdgeKind::Calls | EdgeKind::Instantiates)) {
             if let Some(n) = self.js_declared_value(r, name) {
                 return Outcome::found(n, by::LEXICAL, 90);
@@ -3635,6 +3674,37 @@ impl<'e, 'v> FileCx<'e, 'v> {
             }
         }
         o
+    }
+
+    /// Whether `n` is declared inside `outer`.
+    fn within(&self, n: NodeIdx, outer: NodeIdx) -> bool {
+        let mut cur = self.view.node(n).parent();
+        while let Some(p) = cur {
+            if p == outer {
+                return true;
+            }
+            cur = self.view.node(p).parent();
+        }
+        false
+    }
+
+    /// A supertype named `name` that is not one of `decl`'s own members: an import, the
+    /// package, then another type of this file.
+    fn supertype_outside(&self, name: &str, decl: NodeIdx) -> Option<NodeIdx> {
+        let view = self.view;
+        let is_type = |n: NodeIdx| kind_of(view, n).is_type() && !self.within(n, decl) && n != decl;
+        if let Some(i) = self.visible_import(name, 0) {
+            if let Bound::Node(n) = self.e.bind_import(self.file, i as usize) {
+                return is_type(n).then_some(n);
+            }
+        }
+        if let Some(list) = self.e.pkg_defs.get(self.pkg.0 as usize).and_then(|m| m.get(name)) {
+            let hits: SmallVec<[NodeIdx; 2]> = list.iter().copied().filter(|n| is_type(*n)).collect();
+            if let Some(n) = self.nearest_copy(&hits).or_else(|| hits.first().copied()) {
+                return Some(n);
+            }
+        }
+        view.by_name(name).find(|n| view.hot(*n).file == self.file && is_type(*n))
     }
 
     fn resolve_kind(&self, wcx: &mut WorkerCx<'e, 'v>, r: &RefRec, name: &str, kind: RefKind) -> Outcome {
@@ -3653,7 +3723,19 @@ impl<'e, 'v> FileCx<'e, 'v> {
                     o
                 }
             }
-            RefKind::Edge(EdgeKind::Extends | EdgeKind::Implements | EdgeKind::TypeOf | EdgeKind::Returns) => self.resolve_type_ref(wcx, r, name, Accept::Type),
+            RefKind::Edge(EdgeKind::Extends | EdgeKind::Implements) => {
+                let o = self.resolve_type_ref(wcx, r, name, Accept::Type);
+                // `class C implements Builder` cannot mean C's own nested `Builder`:
+                // a supertype clause is outside the body that declares C's members
+                if o.status == status::RESOLVED && self.within(NodeIdx(o.target), r.from) {
+                    return match self.supertype_outside(name, r.from) {
+                        Some(n) => Outcome::found(n, by::PACKAGE, 85),
+                        None => Outcome::st(status::NO_CANDIDATE),
+                    };
+                }
+                o
+            }
+            RefKind::Edge(EdgeKind::TypeOf | EdgeKind::Returns) => self.resolve_type_ref(wcx, r, name, Accept::Type),
             RefKind::Edge(EdgeKind::Instantiates) if self.swift_extended_builtin(name, r) => Outcome::st(status::BUILTIN),
             // JS `new Class(..)` where `Class` is a parameter or a local: the value it holds, never a
             // same-named class elsewhere (type lookup does not see lexical bindings)
