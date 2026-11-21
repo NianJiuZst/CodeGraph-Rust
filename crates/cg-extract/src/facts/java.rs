@@ -82,23 +82,62 @@ fn java_type_name(cx: &Cx, n: Node) -> String {
     }
 }
 
-fn value_info(cx: &Cx, v: Node) -> String {
+fn expr_path(cx: &Cx, v: Node, depth: u8) -> String {
+    if depth >= 32 {
+        return String::new();
+    }
     match v.kind() {
-        "object_creation_expression" => v.child_by_field_name("type").map(|t| java_type_name(cx, t)).unwrap_or_default(),
+        "identifier" | "this" => cx.text(v).to_owned(),
+        "field_access" => {
+            let Some(obj) = v.child_by_field_name("object") else { return String::new() };
+            let Some(field) = v.child_by_field_name("field") else { return String::new() };
+            let base = expr_path(cx, obj, depth + 1);
+            if base.is_empty() {
+                String::new()
+            } else {
+                format!("{base}.{}", cx.text(field))
+            }
+        }
+        "object_creation_expression" => {
+            let ty = v.child_by_field_name("type").map(|t| java_type_name(cx, t)).unwrap_or_default();
+            if depth == 0 || ty.is_empty() {
+                ty
+            } else {
+                format!("{ty}()")
+            }
+        }
         "method_invocation" => {
             let name = v.child_by_field_name("name").map(|c| cx.text(c)).unwrap_or("");
+            if name.is_empty() {
+                return String::new();
+            }
             match v.child_by_field_name("object") {
-                Some(o) if matches!(o.kind(), "identifier" | "field_access" | "this") => format!("{}.{}()", cx.text(o), name),
-                Some(_) => String::new(),
+                Some(o) => {
+                    let base = expr_path(cx, o, depth + 1);
+                    if base.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{base}.{name}()")
+                    }
+                }
                 None => format!("{name}()"),
             }
         }
-        "parenthesized_expression" | "cast_expression" => {
-            if v.kind() == "cast_expression" {
-                return String::new();
+        "parenthesized_expression" => v.named_child(0).map(|c| expr_path(cx, c, depth + 1)).unwrap_or_default(),
+        "cast_expression" => {
+            if depth == 0 {
+                v.child_by_field_name("type").map(|t| java_type_name(cx, t)).unwrap_or_default()
+            } else {
+                String::new()
             }
-            v.named_child(0).map(|c| value_info(cx, c)).unwrap_or_default()
         }
+        _ => String::new(),
+    }
+}
+
+fn value_info(cx: &Cx, v: Node) -> String {
+    match v.kind() {
+        "object_creation_expression" | "method_invocation" | "parenthesized_expression" | "cast_expression" => expr_path(cx, v, 0),
         _ => String::new(),
     }
 }

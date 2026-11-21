@@ -71,6 +71,10 @@ pub fn detect(path: &str, source: Option<&str>, overrides: &BTreeMap<String, Lan
             if looks_like_objc(src) {
                 return Lang::ObjC;
             }
+            // Declaration-only C++ headers (`extern CComPtr<T> g;`, `void f(const T& x = 0);`, #3397).
+            if looks_like_cpp_decl(src) {
+                return Lang::Cpp;
+            }
         }
     }
     lang
@@ -116,6 +120,123 @@ pub fn looks_like_cpp(source: &str) -> bool {
         return true;
     }
     BASE_CLAUSE.is_match(&COMMENT.replace_all(source, " "))
+}
+
+/// Declaration-only C++ `.h` headers (upstream #3397): C++ syntax in headers that have no
+/// `class` / `namespace` / `template<` keyword (e.g. `const T&`, `T const&`, `extern CComPtr<X> g;`,
+/// or function prototypes with reference / default / template parameters). Skips Objective-C files
+/// (`#import` or `@` in code) whose generics share these shapes.
+pub fn looks_like_cpp_decl(source: &str) -> bool {
+    use regex::Regex;
+    use std::sync::LazyLock;
+    if source.contains("#import") {
+        return false;
+    }
+    // Strip comments, string/char literals, and preprocessor directives into a code-only view.
+    let mut code = String::with_capacity(source.len());
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    let mut line_start = true;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if line_start && (b == b' ' || b == b'\t') {
+            code.push(' ');
+            i += 1;
+            continue;
+        }
+        if line_start && b == b'#' {
+            // Skip preprocessor line (including `\` continuations)
+            while i < bytes.len() {
+                if bytes[i] == b'\n' {
+                    let prev_bs = i > 0 && (bytes[i - 1] == b'\\' || (i > 1 && bytes[i - 1] == b'\r' && bytes[i - 2] == b'\\'));
+                    code.push('\n');
+                    i += 1;
+                    if !prev_bs {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            line_start = true;
+            continue;
+        }
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                if bytes[i] == b'\n' {
+                    code.push('\n');
+                }
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            code.push(' ');
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            let q = b;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                } else if bytes[i] == q {
+                    i += 1;
+                    break;
+                } else {
+                    if bytes[i] == b'\n' {
+                        code.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+            code.push(' ');
+            line_start = false;
+            continue;
+        }
+        if b == b'@' {
+            return false; // Objective-C
+        }
+        if b == b'\n' {
+            line_start = true;
+        } else if b != b'\r' {
+            line_start = false;
+        }
+        code.push(b as char);
+        i += 1;
+    }
+    static CONST_REF: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\bconst\s+(?:(?:struct|enum|union)\s+)?[A-Za-z_][\w:]*(?:\s*<[^{};]*>)?\s*&|\b[A-Za-z_][\w:]*\s+const\s*&").expect("static regex")
+    });
+    static TEMPLATE_DECL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:^|[;{}])\s*(?:(?:extern|static|inline|constexpr|const|volatile)\s+)*[A-Za-z_][\w:]*\s*<\s*[A-Za-z_][\w:\s,*&<>]*>\s*[&*]?\s*[A-Za-z_]\w*\s*[=;(\[]")
+            .expect("static regex")
+    });
+    static FN_CPP_PARAM: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?:^|[;{}])\s*(?:(?:extern|static|inline|constexpr|const|unsigned|signed|long|short|struct)\s+)*[A-Za-z_][\w:]*(?:\s*<[^{};]*>)?[\s*&]+[A-Za-z_]\w*\s*\(([^()]*)\)\s*(?:const\s*)?(?:noexcept\s*)?[;{]",
+        )
+        .expect("static regex")
+    });
+    static PARAM_REF_OR_DEFAULT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?:^|,)\s*(?:const\s+)?[A-Za-z_][\w:]*(?:\s*<[^{};,]*>)?\s*(?:&|\*?\s*[A-Za-z_]\w*\s*=)").expect("static regex"));
+    if CONST_REF.is_match(&code) || TEMPLATE_DECL.is_match(&code) {
+        return true;
+    }
+    for cap in FN_CPP_PARAM.captures_iter(&code) {
+        if let Some(params) = cap.get(1) {
+            let p = params.as_str();
+            if (p.contains('&') || p.contains('=') || p.contains('<')) && PARAM_REF_OR_DEFAULT.is_match(p) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Whether leading comments carry `@flow` (and not `@noflow`).

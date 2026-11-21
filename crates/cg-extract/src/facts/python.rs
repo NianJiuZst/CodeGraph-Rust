@@ -32,18 +32,37 @@ fn walk(cx: &mut Cx, n: Node, scope: u32) {
             walk_children(cx, n, scope);
         }
         "as_pattern" => {
-            if let Some(a) = n.child_by_field_name("alias") {
-                bind_targets(cx, a, scope);
-            } else if let Some(last) = n.named_child(n.named_child_count().saturating_sub(1)) {
-                if last.kind() == "as_pattern_target" {
-                    bind_targets(cx, last, scope);
+            let target =
+                n.child_by_field_name("alias").or_else(|| n.named_child(n.named_child_count().saturating_sub(1)).filter(|c| c.kind() == "as_pattern_target"));
+            if let Some(a) = target {
+                let single_id = if a.kind() == "identifier" {
+                    Some(a)
+                } else if a.kind() == "as_pattern_target" && a.named_child_count() == 1 {
+                    a.named_child(0).filter(|c| c.kind() == "identifier")
+                } else {
+                    None
+                };
+                if let (Some(id), Some(expr)) = (single_id, n.named_child(0).filter(|c| c.id() != a.id())) {
+                    let (vt, init) = value_info(cx, expr, scope);
+                    let nm = cx.text(id).to_owned();
+                    let line = cx.line(id);
+                    cx.add_binding(scope, &nm, BindKind::Local, &vt, &init, line);
+                } else {
+                    bind_targets(cx, a, scope);
                 }
             }
             walk_children(cx, n, scope);
         }
         "named_expression" => {
             if let Some(nm) = n.child_by_field_name("name") {
-                bind_targets(cx, nm, scope);
+                if nm.kind() == "identifier" {
+                    let (vt, init) = n.child_by_field_name("value").map(|v| value_info(cx, v, scope)).unwrap_or_default();
+                    let text = cx.text(nm).to_owned();
+                    let line = cx.line(nm);
+                    cx.add_binding(scope, &text, BindKind::Local, &vt, &init, line);
+                } else {
+                    bind_targets(cx, nm, scope);
+                }
             }
             walk_children(cx, n, scope);
         }
@@ -93,19 +112,52 @@ pub fn py_type_name(text: &str) -> String {
     }
 }
 
+fn py_expr_path(cx: &Cx, n: Node, depth: u8) -> Option<String> {
+    if depth >= 32 {
+        return None;
+    }
+    match n.kind() {
+        "identifier" => Some(cx.text(n).to_owned()),
+        "attribute" => {
+            let obj = n.child_by_field_name("object")?;
+            let attr = n.child_by_field_name("attribute")?;
+            let base = py_expr_path(cx, obj, depth + 1)?;
+            Some(format!("{base}.{}", cx.text(attr)))
+        }
+        "call" => {
+            let f = n.child_by_field_name("function")?;
+            let path = py_expr_path(cx, f, depth + 1)?;
+            Some(format!("{path}()"))
+        }
+        "await" | "parenthesized_expression" => n.named_child(0).and_then(|c| py_expr_path(cx, c, depth + 1)),
+        _ => None,
+    }
+}
+
 fn value_info(cx: &Cx, v: Node, scope: u32) -> (String, String) {
     match v.kind() {
-        "call" => match v.child_by_field_name("function") {
-            Some(f) if matches!(f.kind(), "identifier" | "attribute") => (String::new(), format!("{}()", cx.text(f))),
-            _ => Default::default(),
-        },
+        "call" => (String::new(), py_expr_path(cx, v, 0).unwrap_or_default()),
         "await" | "parenthesized_expression" => v.named_child(0).map(|c| value_info(cx, c, scope)).unwrap_or_default(),
         "identifier" => {
+            let text = cx.text(v);
             // alias of another binding: copy what we know about it
-            match cx.lookup_binding(scope, cx.text(v)) {
+            match cx.lookup_binding(scope, text) {
                 Some((t, i)) => (t, i),
+                // Class reference (`client_class = Client`, `except MyError as e:`):
+                // kept in `init_ctor` so `cls.client_class()` or `e` resolves to the class.
+                None if text.starts_with(|c: char| c.is_ascii_uppercase()) => (String::new(), text.to_owned()),
                 None => Default::default(),
             }
+        }
+        "attribute" => {
+            // `mod.Client` or `self.client`
+            if let Some(p) = py_expr_path(cx, v, 0) {
+                let tail = p.rsplit('.').next().unwrap_or("");
+                if tail.starts_with(|c: char| c.is_ascii_uppercase()) || p.starts_with("self.") || p.starts_with("cls.") {
+                    return (String::new(), p);
+                }
+            }
+            Default::default()
         }
         _ => Default::default(),
     }

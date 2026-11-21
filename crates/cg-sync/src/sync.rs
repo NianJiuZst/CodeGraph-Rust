@@ -605,6 +605,18 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
     let view1 = base_view.with_delta(Arc::new(v1_seg))?;
     ph.lap("draft");
     let mut engine = pool.install(|| Engine::build_with_budget(&view1, &project, budget));
+    if project.web_root.is_none() && !engine.modules.php_web_roots().is_empty() {
+        let php_touched = d.added.iter().any(|e| e.rel.ends_with(".php"))
+            || d.replaced.iter().any(|(_, e)| e.rel.ends_with(".php"))
+            || d.removed.iter().any(|f| base_view.file(*f).lang() == cg_core::Lang::Php);
+        if php_touched {
+            let old_mods = cg_resolve::Modules::build(&base_view, &project);
+            let moved = engine.modules.php_web_roots().iter().any(|(dir, root)| old_mods.php_web_roots().get(dir).is_some_and(|prev| prev != root));
+            if moved {
+                return full_rebuild(store, guard, root, opts, rep, "inferred PHP webRoot changed".into());
+            }
+        }
+    }
     ph.lap("tables");
 
     // ---- 3. affected references ----
@@ -698,6 +710,15 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                     fixture_dirs.push(cg_resolve::project::parent_dir(view1.file(*f).path()).to_owned());
                 } else if kind == BindKind::Field as u8 {
                     changed_rust_fields.insert(fact.1.clone());
+                    // Another field in the same file initialized from this field
+                    // (e.g. Python `cls.client = cls.client_class()`) changes type too.
+                    for b in view1.bindings_of(*f) {
+                        if b.kind == BindKind::Field as u8 && view1.text_str(b.init_ctor).contains(&fact.1) {
+                            let dep = view1.text_str(b.name).to_owned();
+                            record_sym(*f, &dep, &mut d_names, &mut symbol_export_changed);
+                            changed_rust_fields.insert(dep);
+                        }
+                    }
                 } else if kind == BindKind::Mutation as u8 {
                     // `obj.member = fn`: record both the full dotted name and the bare member tail.
                     if let Some((_, tail)) = fact.1.rsplit_once('.') {

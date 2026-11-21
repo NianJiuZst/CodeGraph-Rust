@@ -342,8 +342,14 @@ fn value_info(cx: &Cx, v: Node) -> (String, String) {
         match v.kind() {
             "object_creation_expression" => return (v.child_by_field_name("type").map(|t| type_name(cx, t)).unwrap_or_default(), String::new()),
             "invocation_expression" => {
-                let path = v.child_by_field_name("function").and_then(|f| call_path(cx, f, 0));
-                return (String::new(), path.map(|p| format!("{p}()")).unwrap_or_default());
+                if let Some(f) = v.child_by_field_name("function") {
+                    if let Some(di_type) = di_service_type(cx, f) {
+                        return (di_type, String::new());
+                    }
+                    let path = call_path(cx, f, 0);
+                    return (String::new(), path.map(|p| format!("{p}()")).unwrap_or_default());
+                }
+                return (String::new(), String::new());
             }
             "cast_expression" => return (v.child_by_field_name("type").map(|t| type_name(cx, t)).unwrap_or_default(), String::new()),
             "as_expression" => return (v.child_by_field_name("right").map(|t| type_name(cx, t)).unwrap_or_default(), String::new()),
@@ -357,8 +363,28 @@ fn value_info(cx: &Cx, v: Node) -> (String, String) {
     (String::new(), String::new())
 }
 
-/// Callee of `X()`, `X.Y()`, `x.y()`, `this.x.Y()`, `Make<T>()` without type arguments;
-/// `None` for anything else (chained calls, conditional access, indexers, ...).
+/// `.GetRequiredService<IMediator>()`, `.GetService<T>()`, `.Resolve<T>()`, `.GetInstance<T>()`:
+/// standard .NET DI container getters return their single generic type argument `T`.
+fn di_service_type(cx: &Cx, f: Node) -> Option<String> {
+    let target = if f.kind() == "member_access_expression" { f.child_by_field_name("name")? } else { f };
+    if target.kind() != "generic_name" {
+        return None;
+    }
+    let name = simple_name(cx, target)?;
+    if !matches!(name.as_str(), "GetRequiredService" | "GetService" | "GetRequiredKeyedService" | "GetKeyedService" | "GetInstance" | "Resolve") {
+        return None;
+    }
+    let args = kids(target).find(|c| c.kind() == "type_argument_list")?;
+    let mut types = kids(args).filter(|c| c.is_named() && c.kind() != "comment");
+    let first = types.next()?;
+    if types.next().is_some() {
+        return None;
+    }
+    let ty = type_name(cx, first);
+    (!ty.is_empty()).then_some(ty)
+}
+
+/// Callee of `X()`, `X.Y()`, `x.y()`, `this.x.Y()`, `a().b()`, `Make<T>()` without type arguments.
 fn call_path(cx: &Cx, f: Node, depth: u8) -> Option<String> {
     if depth >= 32 {
         return None;
@@ -366,6 +392,15 @@ fn call_path(cx: &Cx, f: Node, depth: u8) -> Option<String> {
     match f.kind() {
         "identifier" | "generic_name" => simple_name(cx, f),
         "this" if depth > 0 => Some("this".to_owned()),
+        "object_creation_expression" if depth > 0 => {
+            let ty = type_name(cx, f.child_by_field_name("type")?);
+            (!ty.is_empty()).then(|| format!("{ty}()"))
+        }
+        "invocation_expression" if depth > 0 => {
+            let inner = call_path(cx, f.child_by_field_name("function")?, depth + 1)?;
+            Some(format!("{inner}()"))
+        }
+        "parenthesized_expression" => call_path(cx, f.named_child(0)?, depth + 1),
         "member_access_expression" => {
             let recv = call_path(cx, f.child_by_field_name("expression")?, depth + 1)?;
             let name = simple_name(cx, f.child_by_field_name("name")?)?;

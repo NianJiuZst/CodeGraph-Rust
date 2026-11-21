@@ -19,6 +19,8 @@ pub struct ProjectConfig {
     pub deprioritize: Vec<String>,
     /// Also index embedded git repositories.
     pub include_ignored: bool,
+    /// Project-relative PHP web root for `$_SERVER['DOCUMENT_ROOT']` includes (`""` = repo root).
+    pub web_root: Option<String>,
     /// Problems found while reading (shown once by `status`, logged otherwise).
     pub warnings: Vec<String>,
 }
@@ -62,6 +64,20 @@ impl ProjectConfig {
         if let Some(b) = obj.get("includeIgnored").and_then(Value::as_bool) {
             self.include_ignored = b;
         }
+        if let Some(wr) = obj.get("webRoot") {
+            match wr.as_str() {
+                Some(raw) => {
+                    let norm = raw.replace('\\', "/").trim().trim_start_matches("./").trim_matches('/').to_owned();
+                    let norm = if norm == "." { String::new() } else { norm };
+                    if !norm.split('/').any(|seg| seg == "..") {
+                        self.web_root = Some(norm);
+                    } else {
+                        self.warnings.push(format!("{file}: `webRoot` must stay inside the project; ignored"));
+                    }
+                }
+                None => self.warnings.push(format!("{file}: `webRoot` must be a string; ignored")),
+            }
+        }
         if let Some(m) = obj.get("extensions") {
             match m.as_object() {
                 Some(m) => {
@@ -92,6 +108,9 @@ impl ProjectConfig {
             }
         }
         s.push_str(&format!("ii:{}", self.include_ignored));
+        if let Some(wr) = &self.web_root {
+            s.push_str(&format!("\nwr:{wr}"));
+        }
         hash::hash64(s.as_bytes())
     }
 }

@@ -302,7 +302,7 @@ fn locals_and_initializers() {
     assert_eq!(ty(&f, "deep"), ("", "A.B.Factory.Create()"));
     assert_eq!(ty(&f, "genericCall"), ("", "Make()"));
     assert_eq!(ty(&f, "genericRecv"), ("", "Gen.Create()"));
-    assert_eq!(ty(&f, "chained"), ("", ""));
+    assert_eq!(ty(&f, "chained"), ("", "a.B().C()"));
     assert_eq!(ty(&f, "awaited"), ("", ""));
     assert_eq!(ty(&f, "conditional"), ("", ""));
     assert_eq!(ty(&f, "primitive"), ("", ""));

@@ -56,7 +56,12 @@ pub struct Modules<'v> {
     /// TypeScript: the declaration file a `declare module 'name' { ... }` block declares each
     /// module in (upstream `ambient-modules.ts`), first by path.
     ambient: FxHashMap<&'v str, FileId>,
+    /// PHP: folder -> inferred web root for `$_SERVER['DOCUMENT_ROOT']` includes when `webRoot`
+    /// is not explicitly configured in `codegraph.json` / `cgr.json`.
+    php_web_roots: FxHashMap<String, Option<String>>,
 }
+
+const PHP_DOCUMENT_ROOT: &str = "$_SERVER['DOCUMENT_ROOT']";
 
 /// Package key prefixes of the namespace-based languages (Java/Kotlin use the bare name).
 pub const CS_PKG: &str = "cs:";
@@ -89,11 +94,13 @@ impl<'v> Modules<'v> {
             rs_file_mod: FxHashMap::default(),
             by_basename: FxHashMap::default(),
             ambient: FxHashMap::default(),
+            php_web_roots: FxHashMap::default(),
         };
         let mut files: Vec<FileId> = view.files().collect();
         // Delta file ids are appended, unlike a fresh build's path-ordered ids. Package
         // representatives and first-match module aliases must use the same path order.
         files.sort_unstable_by(|a, b| view.file(*a).path().cmp(view.file(*b).path()));
+        let mut php_files: Vec<FileId> = Vec::new();
         for &f in &files {
             let fr = view.file(f);
             let path = fr.path();
@@ -101,6 +108,9 @@ impl<'v> Modules<'v> {
             m.dir_files.entry(dir_of(path)).or_default().push(f);
             if matches!(fr.lang().family(), LangFamily::C | LangFamily::Ruby) {
                 m.by_basename.entry(path.rsplit('/').next().unwrap_or(path)).or_default().push(f);
+            }
+            if fr.lang() == Lang::Php {
+                php_files.push(f);
             }
         }
         for &f in &files {
@@ -124,6 +134,9 @@ impl<'v> Modules<'v> {
                 }
                 _ => {}
             }
+        }
+        if !php_files.is_empty() && project.web_root.is_none() {
+            m.infer_php_web_roots(&php_files);
         }
         m
     }
@@ -316,6 +329,10 @@ impl<'v> Modules<'v> {
         self.rs_mod_to_file.get(&(crate_idx, modpath.to_owned())).copied()
     }
 
+    pub fn php_web_roots(&self) -> &FxHashMap<String, Option<String>> {
+        &self.php_web_roots
+    }
+
     // ------------------------------------------------------------ resolution
     pub fn resolve_import(&self, lang: Lang, spec: &str, from: FileId) -> ImportTarget {
         let from_path = self.path_of(from);
@@ -327,7 +344,7 @@ impl<'v> Modules<'v> {
             LangFamily::Rust => self.resolve_rust(spec, from),
             LangFamily::C => self.resolve_c(spec, from_path),
             LangFamily::CSharp => self.resolve_csharp(spec),
-            LangFamily::Php => self.resolve_php(spec),
+            LangFamily::Php => self.resolve_php(spec, from_path),
             LangFamily::Ruby => self.resolve_ruby(spec, from_path),
             LangFamily::Swift => match self.pkg_by_key.get(format!("{SWIFT_PKG}{spec}").as_str()) {
                 Some(p) => ImportTarget::Pkg(*p),
@@ -439,7 +456,115 @@ impl<'v> Modules<'v> {
     }
 
     // ---- PHP: `use A\B\C;` names a class, interface, trait, function or namespace
-    fn resolve_php(&self, spec: &str) -> ImportTarget {
+    /// Infer per-folder web roots for PHP `$_SERVER['DOCUMENT_ROOT']` includes (upstream #3298):
+    /// a candidate folder above the including file wins when >= 3 distinct include paths resolve
+    /// to indexed files under it and it has >= 2x the evidence of any rival ancestor.
+    fn infer_php_web_roots(&mut self, php_files: &[FileId]) {
+        use rustc_hash::FxHashSet;
+        const MIN_EVIDENCE: usize = 3;
+        const LEAD: usize = 2;
+
+        let mut by_folder: FxHashMap<&str, FxHashSet<&str>> = FxHashMap::default();
+        for &f in php_files {
+            let folder = dir_of(self.path_of(f));
+            for r in self.view.refs_of_file(f) {
+                if cg_core::RefKind::from_wire(r.kind) != Some(cg_core::RefKind::Edge(cg_core::EdgeKind::Imports)) {
+                    continue;
+                }
+                let name = self.view.text_str(r.name);
+                if let Some(rest) = name.strip_prefix(PHP_DOCUMENT_ROOT) {
+                    let written = rest.trim_start_matches('/');
+                    if !written.is_empty() {
+                        by_folder.entry(folder).or_default().insert(written);
+                    }
+                }
+            }
+        }
+        if by_folder.is_empty() {
+            return;
+        }
+        let ancestors = |folder: &str| -> Vec<String> {
+            let mut out = Vec::new();
+            let mut cur = folder;
+            loop {
+                out.push(cur.to_owned());
+                if cur.is_empty() {
+                    break;
+                }
+                cur = parent_dir(cur);
+            }
+            out
+        };
+        let mut written_under: FxHashMap<String, FxHashSet<&str>> = FxHashMap::default();
+        let mut above: FxHashMap<&str, Vec<String>> = FxHashMap::default();
+        for (&folder, paths) in &by_folder {
+            let cands = ancestors(folder);
+            for c in &cands {
+                written_under.entry(c.clone()).or_default().extend(paths.iter().copied());
+            }
+            above.insert(folder, cands);
+        }
+        let mut evidence: FxHashMap<String, usize> = FxHashMap::default();
+        for (c, paths) in &written_under {
+            let mut n = 0usize;
+            for p in paths {
+                let joined = if c.is_empty() { (*p).to_owned() } else { format!("{c}/{p}") };
+                if !joined.split('/').any(|s| s == "..") {
+                    let target = normalize(&joined);
+                    if self.path_to_file.contains_key(target.as_str()) {
+                        n += 1;
+                    }
+                }
+            }
+            evidence.insert(c.clone(), n);
+        }
+        for (folder, cands) in above {
+            let mut best: Option<&str> = None;
+            let mut best_n = 0usize;
+            let mut rival_n = 0usize;
+            for c in &cands {
+                let n = evidence.get(c.as_str()).copied().unwrap_or(0);
+                if n > best_n {
+                    rival_n = best_n;
+                    best = Some(c.as_str());
+                    best_n = n;
+                } else if n > rival_n {
+                    rival_n = n;
+                }
+            }
+            let clear = best.is_some() && best_n >= MIN_EVIDENCE && best_n >= LEAD * rival_n;
+            self.php_web_roots.insert(folder.to_owned(), clear.then(|| best.unwrap().to_owned()));
+        }
+    }
+
+    fn resolve_php(&self, spec: &str, from_path: &str) -> ImportTarget {
+        if let Some(rest) = spec.strip_prefix(PHP_DOCUMENT_ROOT) {
+            let written = rest.trim_start_matches('/');
+            if written.is_empty() || written.split('/').any(|s| s == "..") {
+                return ImportTarget::NotFound;
+            }
+            let web_root = match &self.project.web_root {
+                Some(wr) => Some(wr.as_str()),
+                None => self.php_web_roots.get(dir_of(from_path)).and_then(|o| o.as_deref()),
+            };
+            let Some(root) = web_root else { return ImportTarget::NotFound };
+            let joined = if root.is_empty() { written.to_owned() } else { format!("{root}/{written}") };
+            let cand = normalize(&joined);
+            return self.path_to_file.get(cand.as_str()).map_or(ImportTarget::NotFound, |f| ImportTarget::File(*f));
+        }
+        if spec.starts_with("./") || spec.starts_with("../") || (!spec.contains('\\') && spec.ends_with(".php")) {
+            let rel_cand = normalize(&format!("{}/{spec}", dir_of(from_path)));
+            if let Some(f) = self.path_to_file.get(rel_cand.as_str()) {
+                return ImportTarget::File(*f);
+            }
+            if !spec.starts_with('.') {
+                let root_cand = normalize(spec);
+                if let Some(f) = self.path_to_file.get(root_cand.as_str()) {
+                    return ImportTarget::File(*f);
+                }
+            }
+            return ImportTarget::NotFound;
+        }
         let spec = spec.trim_start_matches('\\');
         let segs: Vec<&str> = spec.split('\\').filter(|s| !s.is_empty()).collect();
         for i in (0..segs.len()).rev() {

@@ -593,6 +593,24 @@ fn use_decl(cx: &mut Cx, n: Node, scope: u32) {
             continue;
         }
         let Some((item, module)) = path.split_last() else { continue };
+        if module.is_empty() {
+            // `use tokio_stream::{self as stream};` or `use other_crate as alias;`
+            // imports the crate/module itself as a namespace alias.
+            let local = local.unwrap_or_else(|| item.clone());
+            cx.add_import(ImportFact {
+                local: local.clone(),
+                imported: "*".into(),
+                spec: item.clone(),
+                kind: ImportKind::Namespace,
+                type_only: false,
+                scope,
+                line,
+            });
+            if public {
+                cx.facts.exports.push(ExportFact { name: local, node_row: NONE, from_spec: item.clone(), from_name: "*".into(), star: false });
+            }
+            continue;
+        }
         let spec = module.join("::");
         let local = local.unwrap_or_else(|| item.clone());
         cx.add_import(ImportFact { local: local.clone(), imported: item.clone(), spec: spec.clone(), kind: ImportKind::Named, type_only: false, scope, line });

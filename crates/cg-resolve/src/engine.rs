@@ -103,7 +103,18 @@ impl<'v> Engine<'v> {
                         if imp.kind == ImportKind::SideEffect as u8 && imp.spec.0 == NONE {
                             return ImportTarget::External;
                         }
-                        modules.resolve_import(lang, view.text_str(imp.spec), f)
+                        let spec = view.text_str(imp.spec);
+                        let tgt = modules.resolve_import(lang, spec, f);
+                        if lang == Lang::Rust && matches!(tgt, ImportTarget::External | ImportTarget::NotFound) {
+                            let imported = view.text_str(imp.imported);
+                            if !spec.is_empty() && !imported.is_empty() && imported != "*" {
+                                let full = format!("{spec}::{imported}");
+                                if let (ImportTarget::File(tf), 0) = modules.resolve_rust_path(&full, f) {
+                                    return ImportTarget::File(tf);
+                                }
+                            }
+                        }
+                        tgt
                     })
                     .collect();
                 (f.idx(), targets)
@@ -615,6 +626,12 @@ impl<'v> Engine<'v> {
                 if let Some(sm) = self.submodule(tf, imported) {
                     return Bound::Module(sm);
                 }
+                if self.view.file(f).lang() == Lang::Rust {
+                    let path = self.view.file(tf).path();
+                    if path.ends_with(&format!("/{imported}.rs")) || path.ends_with(&format!("/{imported}/mod.rs")) || path == format!("{imported}.rs") {
+                        return Bound::Module(tf);
+                    }
+                }
                 // Python `import mod` binds the module; `from pkg import name` may name a submodule
                 Bound::Unknown
             }
@@ -731,6 +748,8 @@ impl<'v> Engine<'v> {
         let tn = self.view.node(t);
         // Rust: an inherent method shadows a trait's, wherever either impl is written
         let mut of_trait = None;
+        let mut php_ci = None;
+        let is_php = self.view.file(tn.file()).lang().family() == LangFamily::Php;
         for e in self.view.out_edges(t) {
             if e.kind == EdgeKind::Contains {
                 let c = self.view.node(e.dst);
@@ -739,8 +758,13 @@ impl<'v> Engine<'v> {
                         return Some(e.dst);
                     }
                     of_trait.get_or_insert(e.dst);
+                } else if is_php && php_ci.is_none() && c.kind().is_callable() && c.name().eq_ignore_ascii_case(name) {
+                    php_ci = Some(e.dst);
                 }
             }
+        }
+        if let Some(m) = php_ci {
+            return Some(m);
         }
         let q = format!("{}::{}", tn.qname(), name);
         let tfile = tn.file();
@@ -794,14 +818,18 @@ impl<'v> Engine<'v> {
         }
     }
 
-    /// Kotlin `fun Lockable.awaitNanos()` outside any type body: the kernel names it
-    /// `Lockable::awaitNanos`, without the package. One in `t`'s package first, else the only one.
+    /// Kotlin `fun Lockable.awaitNanos()` (top-level or member extension inside another class):
+    /// the kernel names it `Lockable::awaitNanos`, without the package. One in `t`'s package
+    /// first, else the only one.
     fn kotlin_extension(&self, t: NodeIdx, name: &str) -> Option<NodeIdx> {
         let view = self.view;
         let tn = view.node(t);
         let mut cands: SmallVec<[NodeIdx; 4]> = view
             .by_qname(&format!("{}::{}", tn.name(), name))
-            .filter(|&c| view.file(view.hot(c).file).lang() == Lang::Kotlin && view.node(c).parent().is_none_or(|p| !view.node(p).kind().is_type()))
+            .filter(|&c| {
+                view.file(view.hot(c).file).lang() == Lang::Kotlin
+                    && view.node(c).parent().is_none_or(|p| !view.node(p).kind().is_type() || view.node(p).name() != tn.name())
+            })
             .collect();
         cands.sort_by_key(|&c| (view.file(view.hot(c).file).path(), view.node(c).start_line()));
         let tpkg = self.modules.pkg_of(tn.file());

@@ -77,19 +77,45 @@ fn find_type(cx: &Cx, n: Node) -> String {
     kids(n).find(|c| matches!(c.kind(), "user_type" | "nullable_type" | "parenthesized_type")).map(|t| type_name(cx, t)).unwrap_or_default()
 }
 
+fn expr_path(cx: &Cx, n: Node, depth: u8) -> Option<String> {
+    if depth >= 32 {
+        return None;
+    }
+    match n.kind() {
+        "simple_identifier" => Some(cx.text(n).to_owned()),
+        "this_expression" => Some("this".to_owned()),
+        "parenthesized_expression" => n.named_child(0).and_then(|c| expr_path(cx, c, depth + 1)),
+        "postfix_expression" => {
+            // `expr!!`
+            let inner = n.named_child(0)?;
+            if cx.text(n).trim_end().ends_with("!!") {
+                expr_path(cx, inner, depth + 1)
+            } else {
+                None
+            }
+        }
+        "navigation_expression" => {
+            let obj = n.named_child(0)?;
+            let suffix = kids(n).find(|c| c.kind() == "navigation_suffix")?;
+            let id = first(suffix, "simple_identifier")?;
+            let base = expr_path(cx, obj, depth + 1)?;
+            Some(format!("{base}.{}", cx.text(id)))
+        }
+        "call_expression" => {
+            let callee = n.named_child(0)?;
+            let path = expr_path(cx, callee, depth + 1)?;
+            Some(format!("{path}()"))
+        }
+        _ => None,
+    }
+}
+
 fn init_of(cx: &Cx, n: Node) -> String {
     // the initialiser is the last expression child of a property declaration
     for c in kids(n).collect::<Vec<_>>().into_iter().rev() {
         match c.kind() {
-            "call_expression" => {
-                let callee = c.named_child(0);
-                return match callee {
-                    Some(f) if matches!(f.kind(), "simple_identifier" | "navigation_expression") => {
-                        let t = cx.text(f).split_whitespace().collect::<String>();
-                        format!("{t}()")
-                    }
-                    _ => String::new(),
-                };
+            "call_expression" | "navigation_expression" | "parenthesized_expression" | "postfix_expression" => {
+                return expr_path(cx, c, 0).unwrap_or_default();
             }
             "binding_pattern_kind" | "variable_declaration" | "modifiers" | "type_constraints" | "getter" | "setter" => break,
             _ => {}

@@ -56,6 +56,8 @@ pub struct ProjectInfo {
     pub crates: Vec<CargoCrate>,
     pub py_deps: FxHashSet<String>,
     pub jvm_deps_text: String,
+    /// Project-relative PHP web root from `codegraph.json` / `cgr.json` (`webRoot`).
+    pub web_root: Option<String>,
     pub config_hashes: BTreeMap<String, u64>,
     pub warnings: Vec<String>,
 }
@@ -122,7 +124,7 @@ impl ProjectInfo {
     /// A watcher already knows the configuration file set. Ordinary source edits need no
     /// directory walk to rediscover it; configuration and directory events use `load`.
     pub fn load_known(root: &Path, files: &[String]) -> ProjectInfo {
-        let mut info = ProjectInfo { root: root.to_path_buf(), ..Default::default() };
+        let mut info = ProjectInfo { root: root.to_path_buf(), web_root: ProjectConfig::load(root).web_root, ..Default::default() };
         for rel in files {
             let abs = root.join(rel);
             let Ok(bytes) = std::fs::read(&abs) else { continue };
