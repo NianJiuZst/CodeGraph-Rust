@@ -1,5 +1,74 @@
 # Changelog
 
+## Unreleased
+
+### Upstream v1.6.4 kernel, multi-language precision/recall, and query parity
+
+- **Re-vendor upstream v1.6.4 (`461a5d8`)** in `crates/cg-kernel` (preserving all 4 reproducible
+  patches via `scripts/sync-kernel.sh`), and cache one `tree_sitter::Parser` per language per
+  worker thread (`cg-kernel/src/hooks.rs`, `cg-extract/src/facts/rust.rs`,
+  `cg-extract/src/macro_mask.rs`) with tight progress-callback deadline checks.
+- **Multi-language precision & recall (`ENGINE_VERSION = 13`)**:
+  - **Rust**: fix `use crate_name::{self as alias}` empty-spec binding, wildcard submodule
+    resolution (`use pkg::*; submod::fn`), inline submodule imports (`mod a { pub mod b; }`),
+    `std::pin::Pin` / `core::pin::Pin` smart-pointer deref, and imported module/package receivers.
+  - **Python**: uppercase class-valued attributes (`client_class = Client`), `with ... as` and
+    walrus (`:=`) bindings, structural chained calls, and class-valued attribute instantiation
+    (`cls.client = cls.client_class()`).
+  - **Kotlin / Java**: structural chained fluent builder calls (`OkHttpClient.Builder().dns().build()`),
+    Java casts, `LangFamily::Jvm` implicit `this` and enclosing class field fallbacks, and
+    dispatch-receiver-scoped Kotlin member extension functions (`private fun Editor.setString()`).
+  - **Go**: prefer concrete struct composite-literal initializers over interface annotations on
+    package/local `var`s (`var JSON Binding = jsonBinding{}`), and support calling function-valued
+    top-level `var`s.
+  - **C#**: extract generic DI getters (`GetRequiredService<T>`, `GetService<T>`,
+    `GetRequiredKeyedService<T>`, `GetKeyedService<T>`, `GetInstance<T>`, `Resolve<T>`), chained
+    calls in `call_path`, and reject non-callable `Property`/`Field`/`EnumMember` targets for
+    `RefKind::FunctionRef`.
+  - **PHP**: ASCII case-insensitive method lookup (`#3297`), relative `__DIR__`/`dirname(__FILE__)`
+    includes, `$_SERVER['DOCUMENT_ROOT']` includes via configured `webRoot` (`cgr.json` /
+    `codegraph.json`) or auto-inferred web roots with incremental sync invalidation.
+  - **C++**: detect declaration-only C++ `.h` headers (`#3397`, `looks_like_cpp_decl`).
+- **Query, CLI, and MCP improvements**:
+  - Focused one-symbol `explore` mode (`#3407`): single-symbol queries return verbatim `<n>\t<line>`
+    definition source, grouped production/test dependent sites, and callees, with automatic
+    fallback on multi-symbol queries, explicit `maxFiles`, or stale files.
+  - `cgr affected`: include cross-file same-package symbol dependencies (Go/Java/Kotlin/C#/Ruby/Swift)
+    and gate process-boundary links (HTTP, queues, sockets, Celery) behind `--cross-tier` (`#3320`)
+    while preserving local in-process `@OnEvent` links.
+  - `cgr node <file>`: use fast single-file `Graph::file_dependents` instead of building a full
+    repository `file_graph()` on every call.
+  - `cgr files` & `codegraph-rust_files`: fix `--format package` via cached on-disk manifest
+    detection (`package.json`, `composer.json`, `Cargo.toml`, `go.mod`, `pyproject.toml`,
+    `pom.xml`, `build.gradle`), and add `--tests` / `--no-tests` (`testsOnly` / `excludeTests`).
+  - `cgr implementations -d/--depth`: make inheritance traversal depth configurable.
+  - `cgr callers` / `callees` / `impact`: wire `fnRef` (`callback registration`) edge labels and
+    surface stale-file warnings when referenced files drifted on disk.
+  - Update MCP server instructions to accurately reflect all 13 extracted languages.
+
+### Engine performance and surgical incremental sync
+
+- **Scanner (`cg-scan`)**: pure-Rust global gitconfig `core.excludesFile` fast-path (with Windows
+  `USERPROFILE` fallback and `[include` fallback to `git`), `RwLock<FxHashMap<String, _>>` nested
+  `.gitignore` cache, `O(1)` per-directory ignore checks, pre-stat language/config filtering,
+  unified single-walk config discovery, and overlapped `git ls-files`.
+- **Extraction & Resolution (`cg-extract`, `cg-resolve`)**: single shared 64 MiB-stack Rayon pool
+  for foreground CLI runs (low-priority retained for background MCP rebuilds/watchers/compaction),
+  `ProjectInfo::hash_known` / `load_known`, dynamic LPT extraction scheduling, Rust `cfg_*!`
+  candidate pre-scan, bit-reversed LPT resolution scheduling, and `WorkerCx::file_cx` cache
+  widening (`6 -> 64`).
+- **Storage (`cg-store`)**: parallelize `finish()` across edge assembly, tail index, 4-way
+  `build_name_indexes`, and chunked `build_token_index` with byte-identical output; cap radix
+  edge-sort scratch; honor `light` delta fsync in `sync_dir` on macOS.
+- **Surgical incremental sync (`cg-sync`)**: diff resolver facts via `symmetric_difference`, split
+  broad vs symbol-level export invalidation through barrels/aliases and JS value forwarders,
+  generalize `BindKind::Field`, Go file-scope `BindKind::Local`, and cross-file receiver
+  invalidation (`changed_receivers`), add PHP case-insensitive method & added-file include
+  invalidation, and raise delta bailout thresholds (`25/75/50%`) with early pre-resolution bailout.
+- **Query (`cg-query`)**: skip Levenshtein-2 DFA for already-matched tokens, cap fuzzy DFA lengths,
+  fuse whole-query and per-word explore search into a single pass, use `select_nth_unstable_by`,
+  and eliminate per-line formatting allocations in `window.rs`.
+
 ## 0.1.0 — first release
 
 ### Language coverage and Rust macro items

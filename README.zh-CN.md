@@ -361,11 +361,11 @@ C/C++、C#、PHP、Ruby、Swift 使用上游的提取 walker，并配有本项�
 | `cgr explore <query…>` | 获取相关源码、调用路径与修改影响 |
 | `cgr query <text> --kind function --json` | 检索符号，可按类型过滤 |
 | `cgr node <symbol-or-file> --code` | 查看符号或文件及其源码 |
-| `cgr files` | 查看已索引文件与结构 |
+| `cgr files [--tests\|--no-tests] [--format package]` | 按目录树、语言或包清单查看已索引文件 |
 | `cgr callers <symbol>` / `cgr callees <symbol>` | 查询调用方或被调用方 |
 | `cgr impact <symbol> --depth 2` | 查看修改影响的图谱邻域 |
-| `cgr implementations <symbol>` | 查找实现或子类型 |
-| `cgr affected <files…> --json` | 查找与变更文件关联的测试文件 |
+| `cgr implementations <symbol> --depth 10` | 查找实现或子类型 |
+| `cgr affected <files…> [--cross-tier] --json` | 查找与变更文件关联的测试文件 |
 | `cgr cycles --json` | 查看导入环；存在环时退出码为 1 |
 | `cgr export --sqlite graph.sqlite` | 导出可供 SQL 分析的 SQLite 图谱 |
 | `cgr serve --mcp` / `cgr serve --http ADDR` | 启动 MCP 服务 |
@@ -474,6 +474,7 @@ cgr serve --http 127.0.0.1:7878 --path /absolute/path/to/project
 | `deprioritize` | 保留索引，但在检索中降低相对自有代码的排名 |
 | `includeIgnored` | 在文件发现阶段纳入嵌套 Git 仓库 |
 | `extensions` | 将额外扩展名映射到已有语言解析器 |
+| `webRoot` | 指定 PHP `$_SERVER['DOCUMENT_ROOT']` 根目录（未配置时自动推断） |
 
 显式 `exclude` 优先于 `include`；重新纳入路径时仍受内置目录跳过规则约束。
 无效配置会产生警告。扩展名映射只选择已有解析器，不会增加新的语言支持。

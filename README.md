@@ -421,11 +421,11 @@ Query commands can locate an index in the current directory or an ancestor.
 | `cgr explore <query…>` | Retrieve related source, call paths and impact |
 | `cgr query <text> --kind function --json` | Search symbols, optionally filtering by kind |
 | `cgr node <symbol-or-file> --code` | Inspect a symbol or file and its source |
-| `cgr files` | List indexed files and structure |
+| `cgr files [--tests\|--no-tests] [--format package]` | List indexed files by tree, language, or package |
 | `cgr callers <symbol>` / `cgr callees <symbol>` | Follow incoming or outgoing calls |
 | `cgr impact <symbol> --depth 2` | Inspect the graph neighborhood affected by a change |
-| `cgr implementations <symbol>` | Find implementations or subtypes |
-| `cgr affected <files…> --json` | Find test files connected to changed files |
+| `cgr implementations <symbol> --depth 10` | Find implementations or subtypes |
+| `cgr affected <files…> [--cross-tier] --json` | Find test files connected to changed files |
 | `cgr cycles --json` | Report import cycles; exit 1 when cycles are found |
 | `cgr export --sqlite graph.sqlite` | Export a queryable SQLite graph |
 | `cgr serve --mcp` / `cgr serve --http ADDR` | Start an MCP service |
@@ -542,6 +542,7 @@ Place `cgr.json` at the project root. The upstream filename `codegraph.json` is 
 | `deprioritize` | Keep matching paths indexed but rank them below first-party code |
 | `includeIgnored` | Include embedded Git repositories during discovery |
 | `extensions` | Map extra extensions to existing language parsers |
+| `webRoot` | Explicit document root for PHP `$_SERVER['DOCUMENT_ROOT']` includes (auto-inferred when omitted) |
 
 Explicit `exclude` rules take precedence over `include`; built-in directory skips still apply
 when re-including paths. Invalid configuration produces warnings. Extension mappings select
