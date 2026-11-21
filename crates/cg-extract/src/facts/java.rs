@@ -28,6 +28,7 @@ fn walk(cx: &mut Cx, n: Node, scope: u32) {
         "lambda_expression" => lambda(cx, n, scope),
         "method_invocation" => {
             super::args::java_call(cx, n);
+            super_receiver(cx, n);
             walk_children(cx, n, scope);
         }
         "local_variable_declaration" => {
@@ -148,8 +149,39 @@ fn import(cx: &mut Cx, n: Node, scope: u32) {
     cx.add_import(fact);
 }
 
+/// The kernel names `super.m()` as a bare `m`, which would bind to the caller's own
+/// override; restore the `super.` receiver so the call resolves in the ancestors.
+fn super_receiver(cx: &mut Cx, n: Node) {
+    let Some(name) = n.child_by_field_name("name") else { return };
+    if !n.child_by_field_name("object").is_some_and(|o| o.kind() == "super") {
+        return;
+    }
+    let pos = cx.start(n);
+    let method = cx.text(name).to_owned();
+    cx.facts.call_names.push(CallNameFact {
+        line: (pos >> 32) as u32,
+        col: pos as u32,
+        tail: method.clone(),
+        kernel_name: method.clone(),
+        name: format!("super.{method}"),
+    });
+}
+
+/// `<T extends Foo, U>` of a class or method: `T` names no project declaration.
+fn type_params(cx: &mut Cx, n: Node, scope: u32) {
+    let Some(tp) = n.child_by_field_name("type_parameters") else { return };
+    for p in kids(tp).filter(|p| p.kind() == "type_parameter") {
+        if let Some(nm) = kids(p).find(|c| matches!(c.kind(), "type_identifier" | "identifier")) {
+            let t = cx.text(nm).to_owned();
+            let line = cx.line(nm);
+            cx.add_binding(scope, &t, BindKind::TypeParam, "", "", line);
+        }
+    }
+}
+
 fn class(cx: &mut Cx, n: Node, scope: u32) {
     let sc = cx.push_scope(ScopeKind::Class, scope, n);
+    type_params(cx, n, sc);
     // record components `record R(Foo a)`
     if let Some(params) = n.child_by_field_name("parameters") {
         for p in kids(params) {
@@ -178,6 +210,7 @@ fn class(cx: &mut Cx, n: Node, scope: u32) {
 
 fn function(cx: &mut Cx, n: Node, scope: u32) {
     let sc = cx.push_scope(ScopeKind::Function, scope, n);
+    type_params(cx, n, sc);
     if let Some(params) = n.child_by_field_name("parameters") {
         for p in kids(params) {
             match p.kind() {

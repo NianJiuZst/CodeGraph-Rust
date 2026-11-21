@@ -1377,3 +1377,139 @@ fn rust_inherent_method_shadows_a_trait_method() {
     // with no inherent method of the name, the trait's
     assert!(has(&edges, "src/same.rs::talk -calls-> src/same.rs::Job::speak"), "{edges:#?}");
 }
+
+/// `dump_edges` with the target's start line, which tells overloads apart.
+fn edges_with_target_lines(view: &View) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in view.files() {
+        for n in view.nodes_in_file(f) {
+            let n = cg_core::NodeIdx(n);
+            for e in view.out_edges(n) {
+                if e.kind != cg_core::EdgeKind::Contains {
+                    out.push(format!("{} -{}-> {}:{}", dump::node_label(view, n), e.kind, dump::node_label(view, e.dst), view.node(e.dst).start_line()));
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[test]
+fn java_overloads_fields_super_and_type_parameters() {
+    let (_d, view) = project(&[
+        (
+            "src/p/Box.java",
+            r#"package p;
+public class Box {
+  private int size;
+  public int size() { return size; }
+  public void put(Object a) {}
+  public void put(Object a, Object b) {}
+  public void log() {}
+  public void log(String fmt, Object... args) {}
+  public <T> T pick(T value) { return value; }
+  public int run() { put(1, 2); log("a", 1, 2); return size(); }
+}
+"#,
+        ),
+        ("src/p/E.java", "package p;\npublic enum E { T, U }\n"),
+        ("src/p/Base.java", "package p;\npublic class Base { public void close() {} }\n"),
+        ("src/p/Child.java", "package p;\npublic class Child extends Base {\n  @Override public void close() { super.close(); }\n}\n"),
+        ("src/p/Builder.java", "package p;\npublic interface Builder<R> { R build(); }\n"),
+        (
+            "src/p/Maker.java",
+            "package p;\npublic class Maker implements Builder<Integer> {\n  public Integer build() { return 1; }\n  public static class Builder {}\n}\n",
+        ),
+    ]);
+    let edges = edges_with_target_lines(&view);
+    for e in &edges {
+        eprintln!("{e}");
+    }
+    let run = "src/p/Box.java::p::Box::run";
+    assert!(has(&edges, &format!("{run} -calls-> src/p/Box.java::p::Box::put:6")), "two arguments pick the two-parameter overload");
+    assert!(!has(&edges, &format!("{run} -calls-> src/p/Box.java::p::Box::put:5")));
+    assert!(has(&edges, &format!("{run} -calls-> src/p/Box.java::p::Box::log:8")), "varargs overload");
+    assert!(has(&edges, &format!("{run} -calls-> src/p/Box.java::p::Box::size:4")), "a call names the method, not the field");
+    assert!(!has(&edges, &format!("{run} -calls-> src/p/Box.java::p::Box::size:3")));
+    let close = "src/p/Child.java::p::Child::close";
+    assert!(has(&edges, &format!("{close} -calls-> src/p/Base.java::p::Base::close:2")), "super.close() is the parent's");
+    assert!(!has(&edges, &format!("{close} -calls-> {close}:3")), "super.close() is not recursion");
+    assert!(!edges.iter().any(|e| e.contains("-references-> src/p/E.java::p::E::T")), "a type parameter is not the enum constant T");
+    assert!(
+        has(&edges, "src/p/Maker.java::p::Maker -implements-> src/p/Builder.java::p::Builder:2"),
+        "a supertype clause cannot name the class's own member type"
+    );
+}
+
+#[test]
+fn java_duplicate_source_roots_resolve_within_their_own_root() {
+    let closer = "package q;\npublic final class Closer {\n  public static Closer create() { return new Closer(); }\n  public void close() {}\n}\n";
+    let user = "package q;\nclass User {\n  void run() {\n    Closer closer = Closer.create();\n    closer.close();\n  }\n}\n";
+    let (_d, view) = project(&[
+        ("lib/src/q/Closer.java", closer),
+        ("lib/src/q/User.java", user),
+        ("android/lib/src/q/Closer.java", closer),
+        ("android/lib/src/q/User.java", user),
+        ("lib-tests/test/q/UserTest.java", "package q;\nclass UserTest {\n  void t() { Closer.create().close(); }\n}\n"),
+    ]);
+    let edges = dump::dump_edges(&view);
+    for e in &edges {
+        eprintln!("{e}");
+    }
+    for root in ["lib", "android/lib"] {
+        let run = format!("{root}/src/q/User.java::q::User::run");
+        assert!(has(&edges, &format!("{run} -calls-> {root}/src/q/Closer.java::q::Closer::create")), "{root}: same-package type in its own root");
+        assert!(has(&edges, &format!("{run} -calls-> {root}/src/q/Closer.java::q::Closer::close")), "{root}: typed local");
+    }
+    assert!(
+        has(&edges, "lib-tests/test/q/UserTest.java::q::UserTest::t -calls-> lib/src/q/Closer.java::q::Closer::create"),
+        "the nearest root by directory distance"
+    );
+}
+
+#[test]
+fn rust_inline_test_modules_self_init_calls_and_guesses() {
+    let (_d, view) = project(&[
+        ("Cargo.toml", "[package]\nname = \"demo\"\n"),
+        ("src/lib.rs", "macro_rules! cfg_net { ($($i:item)*) => { $($i)* } }\npub mod net;\npub mod app;\n"),
+        (
+            "src/net.rs",
+            r#"cfg_net! {
+    pub struct Sock { fd: i32 }
+}
+impl Sock {
+    pub fn bind() -> Sock { Sock { fd: 0 } }
+    pub fn send(&self) { self.flush(); }
+    fn flush(&self) {}
+    pub fn sync_all(&self) {}
+}
+"#,
+        ),
+        (
+            "src/app.rs",
+            r#"use crate::net::Sock;
+fn rt() -> u32 { 1 }
+pub fn run() {
+    let s = Sock::bind();
+    let rt = rt();
+}
+pub struct File { std: u32 }
+impl File {
+    pub fn sync_all(&self) { let std = self.std; std.sync_all(); }
+}
+"#,
+        ),
+        ("tests/it.rs", "mod support {\n    pub mod helper;\n}\nuse support::helper::assist;\n#[test]\nfn t() { assist(); }\n"),
+        ("tests/support/helper.rs", "pub fn assist() {}\n"),
+    ]);
+    let mut edges = dump::dump_edges(&view);
+    edges.dedup();
+    for e in &edges {
+        eprintln!("{e}");
+    }
+    assert!(has(&edges, "src/app.rs::run -calls-> src/app.rs::rt"), "`let rt = rt()` calls the function");
+    assert!(!has(&edges, "src/app.rs::File::sync_all -calls-> src/app.rs::File::sync_all"), "a name-only guess is never the caller");
+    assert!(has(&edges, "tests/it.rs::t -calls-> tests/support/helper.rs::assist"), "inline `mod support {{ pub mod helper; }}` in a test crate");
+}

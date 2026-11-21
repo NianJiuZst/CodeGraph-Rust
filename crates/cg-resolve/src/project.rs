@@ -79,6 +79,16 @@ pub fn normalize(p: &str) -> String {
     out.join("/")
 }
 
+/// How close two project paths are: minus the number of directory steps between their
+/// folders. Copies of one declaration in several source roots (`guava/src/...`,
+/// `android/guava/src/...`) are told apart by it; `guava-tests/test` is nearer the first.
+pub fn path_affinity(a: &str, b: &str) -> i64 {
+    let (a, b) = (parent_dir(a), parent_dir(b));
+    let depth = |p: &str| if p.is_empty() { 0 } else { p.split('/').count() };
+    let common = a.split('/').zip(b.split('/')).take_while(|(x, y)| x == y && !x.is_empty()).count();
+    -((depth(a) - common + depth(b) - common) as i64)
+}
+
 pub fn parent_dir(p: &str) -> &str {
     p.rfind('/').map(|i| &p[..i]).unwrap_or("")
 }
