@@ -43,11 +43,42 @@ impl ScanOptions {
 pub struct ScanResult {
     /// Sorted by path bytes.
     pub files: Vec<FileEntry>,
+    /// Project configuration manifests discovered during the same walk (depth <= 8), sorted.
+    pub config_files: Vec<String>,
     /// Over the size cap (not extracted).
     pub too_large: Vec<String>,
     /// Source files in languages without a walker in this build.
     pub unsupported: usize,
     pub warnings: Vec<String>,
+}
+
+pub fn is_config_filename(name: &str) -> bool {
+    matches!(
+        name,
+        "package.json"
+            | "jsconfig.json"
+            | "go.mod"
+            | "go.work"
+            | "Cargo.toml"
+            | "pyproject.toml"
+            | "setup.cfg"
+            | "setup.py"
+            | "requirements.txt"
+            | "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "settings.gradle"
+            | "settings.gradle.kts"
+            | "composer.json"
+    ) || (name.starts_with("tsconfig") && name.ends_with(".json"))
+        || (name.starts_with("requirements") && name.ends_with(".txt"))
+}
+
+const CONFIG_MAX_DEPTH: usize = 8;
+
+fn within_config_depth(rel: &str, max_depth: usize) -> bool {
+    // WalkBuilder max_depth(8): root-level file has depth 1 (0 slashes), depth 8 has 7 slashes.
+    rel.bytes().filter(|&b| b == b'/').count() < max_depth
 }
 
 pub fn mtime_ns(meta: &std::fs::Metadata) -> i64 {
@@ -111,6 +142,7 @@ pub fn stat_entry(rules: &IgnoreRules, cfg: &ProjectConfig, rel: &str) -> Option
 #[derive(Default)]
 struct Collected {
     files: Vec<FileEntry>,
+    config_files: Vec<String>,
     too_large: Vec<String>,
     unsupported: usize,
 }
@@ -147,22 +179,43 @@ fn walk(root: &Path, rules: Arc<IgnoreRules>, cfg: &ProjectConfig, max: u64, onl
             }
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
-                let skip = if only_included { rules.builtin_ignored(&rel, true) } else { rules.is_ignored(&rel, true) };
+                let skip = if only_included { rules.builtin_ignored(&rel, true) } else { rules.is_entry_ignored(&rel, true) };
                 return if skip { WalkState::Skip } else { WalkState::Continue };
             }
             if entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
                 return WalkState::Continue;
             }
-            let keep = if only_included { rules.matches_include(&rel, false) && !rules.builtin_ignored(&rel, false) } else { !rules.is_ignored(&rel, false) };
+            // Cheap path-only filter BEFORE ignore evaluation or stat(): skip files that are
+            // neither supported/unsupported source files nor project configuration manifests.
+            let basename = rel.rsplit('/').next().unwrap_or(&rel);
+            let is_cfg = within_config_depth(&rel, CONFIG_MAX_DEPTH) && is_config_filename(basename);
+            let l = lang::detect_from_path(&rel, &cfg.extensions);
+            if l == Lang::Unknown && !is_cfg {
+                return WalkState::Continue;
+            }
+            let keep =
+                if only_included { rules.matches_include(&rel, false) && !rules.builtin_ignored(&rel, false) } else { !rules.is_entry_ignored(&rel, false) };
             if !keep {
                 return WalkState::Continue;
             }
+            if is_cfg && entry.file_type().map(|t| t.is_file()).unwrap_or(true) {
+                sink.local.config_files.push(rel.clone());
+            }
+            if l == Lang::Unknown {
+                return WalkState::Continue;
+            }
+            if !l.is_supported() {
+                sink.local.unsupported += 1;
+                return WalkState::Continue;
+            }
             let Ok(meta) = entry.metadata() else { return WalkState::Continue };
-            match judge(&rel, &meta, &cfg, max) {
-                Verdict::Take(e) => sink.local.files.push(e),
-                Verdict::TooLarge => sink.local.too_large.push(rel),
-                Verdict::Unsupported => sink.local.unsupported += 1,
-                Verdict::Skip => {}
+            if !meta.is_file() {
+                return WalkState::Continue;
+            }
+            if meta.len() > max {
+                sink.local.too_large.push(rel);
+            } else {
+                sink.local.files.push(FileEntry { rel, lang: l, size: meta.len(), mtime_ns: mtime_ns(&meta) });
             }
             WalkState::Continue
         })
@@ -210,27 +263,6 @@ fn git_tracked_ignored(root: &Path) -> Vec<String> {
 /// Returns sorted repo-relative paths.
 pub fn find_config_files(root: &Path, config: &ProjectConfig, max_depth: usize) -> Vec<String> {
     let rules = IgnoreRules::new(root, config);
-    let is_config = |name: &str| {
-        matches!(
-            name,
-            "package.json"
-                | "jsconfig.json"
-                | "go.mod"
-                | "go.work"
-                | "Cargo.toml"
-                | "pyproject.toml"
-                | "setup.cfg"
-                | "setup.py"
-                | "requirements.txt"
-                | "pom.xml"
-                | "build.gradle"
-                | "build.gradle.kts"
-                | "settings.gradle"
-                | "settings.gradle.kts"
-                | "composer.json"
-        ) || (name.starts_with("tsconfig") && name.ends_with(".json"))
-            || (name.starts_with("requirements") && name.ends_with(".txt"))
-    };
     let mut out = Vec::new();
     let mut ignored_candidates = FxHashSet::default();
     let walker = WalkBuilder::new(root).standard_filters(false).follow_links(false).max_depth(Some(max_depth)).build();
@@ -240,7 +272,7 @@ pub fn find_config_files(root: &Path, config: &ProjectConfig, max_depth: usize) 
             continue;
         }
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if !is_dir && !e.file_type().is_some_and(|t| t.is_symlink()) && is_config(e.file_name().to_str().unwrap_or("")) {
+        if !is_dir && !e.file_type().is_some_and(|t| t.is_symlink()) && is_config_filename(e.file_name().to_str().unwrap_or("")) {
             if !rules.is_ignored(&rel, false) {
                 out.push(rel);
             } else if !rules.builtin_ignored(&rel, false) {
@@ -269,6 +301,12 @@ pub fn find_config_files(root: &Path, config: &ProjectConfig, max_depth: usize) 
 }
 
 pub fn scan(opts: &ScanOptions) -> ScanResult {
+    // Overlap `git ls-files` with the parallel filesystem walk so the subprocess never sits on
+    // the critical path when the repo has many directories.
+    let git_handle = opts.tracked_ignored.then(|| {
+        let root = opts.root.clone();
+        std::thread::spawn(move || git_tracked_ignored(&root))
+    });
     let rules = Arc::new(IgnoreRules::new(&opts.root, &opts.config));
     let mut parts = walk(&opts.root, rules.clone(), &opts.config, opts.max_file_size, false);
     if rules.has_include() {
@@ -276,6 +314,7 @@ pub fn scan(opts: &ScanOptions) -> ScanResult {
     }
     let mut res = ScanResult { warnings: opts.config.warnings.clone(), ..Default::default() };
     let mut seen: FxHashSet<String> = FxHashSet::default();
+    let mut seen_cfg: FxHashSet<String> = FxHashSet::default();
     for c in parts {
         res.unsupported += c.unsupported;
         res.too_large.extend(c.too_large);
@@ -284,20 +323,41 @@ pub fn scan(opts: &ScanOptions) -> ScanResult {
                 res.files.push(f);
             }
         }
+        for cfg in c.config_files {
+            if seen_cfg.insert(cfg.clone()) {
+                res.config_files.push(cfg);
+            }
+        }
     }
-    if opts.tracked_ignored {
-        for rel in git_tracked_ignored(&opts.root) {
-            if seen.contains(&rel) || rules.builtin_ignored(&rel, false) {
+    if let Some(handle) = git_handle {
+        let tracked = handle.join().unwrap_or_default();
+        for rel in tracked {
+            if rules.builtin_ignored(&rel, false) {
+                continue;
+            }
+            let basename = rel.rsplit('/').next().unwrap_or(&rel);
+            let is_cfg = within_config_depth(&rel, CONFIG_MAX_DEPTH) && is_config_filename(basename) && !seen_cfg.contains(&rel);
+            let need_src = !seen.contains(&rel) && lang::detect_from_path(&rel, &opts.config.extensions) != Lang::Unknown;
+            if !is_cfg && !need_src {
                 continue;
             }
             let Ok(meta) = std::fs::symlink_metadata(opts.root.join(&rel)) else { continue };
-            if let Verdict::Take(e) = judge(&rel, &meta, &opts.config, opts.max_file_size) {
-                seen.insert(rel);
-                res.files.push(e);
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                continue;
+            }
+            if is_cfg && seen_cfg.insert(rel.clone()) {
+                res.config_files.push(rel.clone());
+            }
+            if need_src {
+                if let Verdict::Take(e) = judge(&rel, &meta, &opts.config, opts.max_file_size) {
+                    seen.insert(rel);
+                    res.files.push(e);
+                }
             }
         }
     }
     res.files.sort_by(|a, b| a.rel.as_bytes().cmp(b.rel.as_bytes()));
+    res.config_files.sort();
     res.too_large.sort();
     res
 }

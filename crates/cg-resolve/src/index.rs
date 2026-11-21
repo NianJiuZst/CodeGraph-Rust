@@ -8,30 +8,24 @@ use crate::project::ProjectInfo;
 use cg_core::budget::{peak_rss_mb, MemBudget};
 use cg_core::config::ProjectConfig;
 use cg_core::{CgError, Result};
-use cg_extract::{fileflags, try_extract_stream, ExtractConfig, FileBatch, FileHook};
+use cg_extract::{fileflags, try_extract_stream_in_pool, ExtractConfig, FileBatch, FileHook};
 use cg_scan::{scan, ScanOptions};
 use cg_store::{build_draft, finish, Draft, FinishInput, ProjectMeta, Seg, Store, View};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct IndexOptions {
     pub threads: Option<usize>,
     pub memory_mb: Option<u64>,
     pub low_priority: bool,
 }
 
-impl Default for IndexOptions {
-    fn default() -> Self {
-        Self { threads: None, memory_mb: None, low_priority: true }
-    }
-}
-
 pub fn indexing_pool(budget: MemBudget, low_priority: bool) -> Result<rayon::ThreadPool> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(budget.threads)
-        .stack_size(16 << 20)
+        .stack_size(64 << 20)
         .start_handler(move |_| {
             if low_priority {
                 cg_core::budget::lower_thread_priority();
@@ -124,7 +118,7 @@ pub fn build_seg(root: &Path, opts: &IndexOptions) -> Result<Built> {
     report.too_large_files = scanned.too_large.len();
     phase.lap("scan");
 
-    let project = ProjectInfo::load(root, &config);
+    let project = ProjectInfo::load_known(root, &scanned.config_files);
     let frameworks = project.detect_frameworks();
     report.frameworks = frameworks.clone();
     phase.lap("project");
@@ -139,7 +133,7 @@ pub fn build_seg(root: &Path, opts: &IndexOptions) -> Result<Built> {
     let mut batches: Vec<FileBatch> = Vec::with_capacity(scanned.files.len());
     let mut resident = 0u64;
     let spill_dir = root.join(cg_core::brand::DATA_DIR).join("tmp");
-    try_extract_stream(&scanned.files, &cfg, |i, b| {
+    try_extract_stream_in_pool(&pool, &scanned.files, &cfg, |i, b| {
         if let Some(mut b) = b {
             if deprio.as_ref().is_some_and(|g| g.matched_path_or_any_parents(&scanned.files[i].rel, false).is_ignore()) {
                 b.flags |= fileflags::DEPRIORITIZED;

@@ -75,7 +75,7 @@ pub fn finish(draft: Draft, input: FinishInput) -> Seg {
         seg.p.file_facts = Part::owned(ff);
     }
 
-    // ---- edges ----
+    // ---- edges, tail index, name indexes and token index are independent: build in parallel ----
     let meta_base = emeta.len() as u32;
     for mut e in input.edges {
         if e.meta != NONE {
@@ -93,18 +93,43 @@ pub fn finish(draft: Draft, input: FinishInput) -> Seg {
     }
     seg.p.emeta_off = Part::owned(em_off);
     seg.p.emeta_data = Part::owned(em_data);
-    let asm = edges::assemble(&mut all_edges, n_nodes);
+
+    let name_post_off = &seg.p.name_post_off;
+    let qname_post_off = &seg.p.qname_post_off;
+    let ((asm, tails), (ni, ti)) = rayon::join(
+        || {
+            rayon::join(
+                || edges::assemble(&mut all_edges, n_nodes),
+                || {
+                    let mut tails: Vec<TailRec> = seg.p.refs.par_iter().enumerate().map(|(i, r)| TailRec { tail: r.tail, ref_idx: i as u32 }).collect();
+                    tails.par_sort_unstable_by_key(|t| (t.tail.0, t.ref_idx));
+                    tails
+                },
+            )
+        },
+        || {
+            rayon::join(
+                || index::build_name_indexes(&seg.names, |i| name_post_off[i + 1] > name_post_off[i] || qname_post_off[i + 1] > qname_post_off[i]),
+                || {
+                    index::build_token_index(&TokenInputs {
+                        hot: &seg.p.nodes_hot,
+                        cold: &seg.p.nodes_cold,
+                        files: &seg.p.files,
+                        names: &seg.names,
+                        paths: &seg.paths,
+                        text: &seg.text,
+                        names_base: 0,
+                        paths_base: 0,
+                        text_base: 0,
+                        node_base: 0,
+                        file_slot: None,
+                    })
+                },
+            )
+        },
+    );
     edges::install(&mut seg, asm);
-
-    // ---- tail index: refs by tail key ----
-    let mut tails: Vec<TailRec> = seg.p.refs.par_iter().enumerate().map(|(i, r)| TailRec { tail: r.tail, ref_idx: i as u32 }).collect();
-    tails.par_sort_unstable_by_key(|t| (t.tail.0, t.ref_idx));
     seg.p.tail_idx = Part::owned(tails);
-
-    // ---- search indexes ----
-    let name_post_off = seg.p.name_post_off.clone();
-    let qname_post_off = seg.p.qname_post_off.clone();
-    let ni = index::build_name_indexes(&seg.names, |i| name_post_off[i + 1] > name_post_off[i] || qname_post_off[i + 1] > qname_post_off[i]);
     seg.p.names_fst = Part::owned(ni.names_fst);
     seg.p.lower_fst = Part::owned(ni.lower_fst);
     seg.p.lower_post_off = Part::owned(ni.lower_post_off);
@@ -115,19 +140,6 @@ pub fn finish(draft: Draft, input: FinishInput) -> Seg {
     seg.p.tri_keys = Part::owned(ni.tri_keys);
     seg.p.tri_off = Part::owned(ni.tri_off);
     seg.p.tri_post = Part::owned(ni.tri_post);
-    let ti = index::build_token_index(&TokenInputs {
-        hot: &seg.p.nodes_hot,
-        cold: &seg.p.nodes_cold,
-        files: &seg.p.files,
-        names: &seg.names,
-        paths: &seg.paths,
-        text: &seg.text,
-        names_base: 0,
-        paths_base: 0,
-        text_base: 0,
-        node_base: 0,
-        file_slot: None,
-    });
     seg.p.tokens_fst = Part::owned(ti.fst);
     seg.p.token_post_off = Part::owned(ti.post_off);
     seg.p.token_post = Part::owned(ti.post);

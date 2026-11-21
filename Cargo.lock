@@ -318,6 +318,7 @@ dependencies = [
  "cg-core",
  "globset",
  "ignore",
+ "memchr",
  "rayon",
  "regex",
  "rustc-hash",

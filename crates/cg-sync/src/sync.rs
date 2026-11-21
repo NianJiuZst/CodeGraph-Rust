@@ -16,7 +16,7 @@ use crate::detect::{diff_view, Diff};
 use cg_core::budget::MemBudget;
 use cg_core::config::ProjectConfig;
 use cg_core::{brand, CgError, EdgeKind, FileId, LangFamily, NodeIdx, NodeKind, RefKind, Result, StrId, NONE};
-use cg_extract::{fileflags, try_extract_stream, BindKind, ExtractConfig, FileBatch};
+use cg_extract::{fileflags, try_extract_stream_in_pool, BindKind, ExtractConfig, FileBatch};
 use cg_resolve::driver::{make_edge, round_of, update_of, FNREF_META};
 use cg_resolve::{hooks_for, index_with_guard, resolve_refs, Engine, IndexOptions, Outcome, ProjectInfo, Round_};
 use cg_scan::{scan, ScanOptions};
@@ -95,9 +95,12 @@ impl Phase {
     }
 }
 
-/// Fraction limits from the design (9.3 step 9).
-const MAX_AFFECTED_REF_PCT: usize = 30;
-const MAX_AFFECTED_FILE_PCT: usize = 20;
+/// Fraction limits for incremental delta vs full rebuild.
+/// Extraction accounts for the majority of full-rebuild time, so an edges-only delta stays much
+/// faster than re-extracting the repository even when many references are re-resolved.
+const MAX_CHANGED_FILE_PCT: usize = 25;
+const MAX_AFFECTED_REF_PCT: usize = 75;
+const MAX_AFFECTED_FILE_PCT: usize = 50;
 /// Merge when the delta covers this much of the project, or after this many syncs (5.7).
 const MERGE_FILE_PCT: usize = 5;
 const MERGE_AFTER_SYNCS: u32 = 200;
@@ -457,22 +460,25 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
     }
 
     let config = ProjectConfig::load(root);
-    let paths = event_paths(root, &snap.view, opts.paths.as_deref());
-    let project = match &paths {
-        Some(_) => ProjectInfo::load_known(root, &base.meta.config_digests.keys().cloned().collect::<Vec<_>>()),
-        None => ProjectInfo::load(root, &config),
-    };
     if base.meta.config_digest != config.digest() {
         return full_rebuild(store, guard, root, opts, rep, "project configuration changed".into());
     }
-    if base.meta.config_digests != project.config_hashes {
-        return full_rebuild(store, guard, root, opts, rep, "a build/config file (tsconfig, package.json, go.mod, Cargo.toml, ...) changed".into());
-    }
+    let paths = event_paths(root, &snap.view, opts.paths.as_deref());
 
-    // ---- 1. diff ----
+    // ---- 1. scan + config hash check (single walk for CLI sync) ----
     let mut sopts = ScanOptions::new(root);
     sopts.config = config.clone();
-    let entries = paths.as_ref().and_then(|p| scan_events(root, &config, &snap.view, p)).unwrap_or_else(|| scan(&sopts).files);
+    let (entries, config_files): (Vec<cg_scan::FileEntry>, Vec<String>) = match paths.as_ref().and_then(|p| scan_events(root, &config, &snap.view, p)) {
+        Some(entries) => (entries, base.meta.config_digests.keys().cloned().collect()),
+        None => {
+            let scanned = scan(&sopts);
+            (scanned.files, scanned.config_files)
+        }
+    };
+    let config_hashes = ProjectInfo::hash_known(root, &config_files);
+    if base.meta.config_digests != config_hashes {
+        return full_rebuild(store, guard, root, opts, rep, "a build/config file (tsconfig, package.json, go.mod, Cargo.toml, ...) changed".into());
+    }
     ph.lap("scan");
     let current = diff_view(&snap.view, root, &entries);
     if current.is_empty() {
@@ -483,6 +489,7 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
         rep.timings = ph.timings;
         return Ok(rep);
     }
+    let project = ProjectInfo::load_known(root, &config_files);
     let base_view = View::new(base.clone()).with_root(root.to_path_buf());
     let d: Diff = diff_view(&base_view, root, &entries);
     ph.lap("diff");
@@ -498,6 +505,11 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
     rep.removed = d.removed.len();
     rep.touched = d.touched.len();
     let n_base_files = base.p.files.len();
+    let changed_content = d.added.len() + d.replaced.len() + d.removed.len();
+    if n_base_files >= 40 && changed_content * 100 > n_base_files * MAX_CHANGED_FILE_PCT {
+        let why = format!("{changed_content} of {n_base_files} files changed");
+        return full_rebuild(store, guard, root, opts, rep, why);
+    }
 
     // ---- 2. re-extract the changed files ----
     let pool = cg_resolve::index::indexing_pool(budget, opts.index.low_priority)?;
@@ -514,7 +526,7 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
     let mut extracted: Vec<Option<FileBatch>> = (0..entries.len()).map(|_| None).collect();
     let mut resident = 0u64;
     let spill_dir = root.join(brand::DATA_DIR).join("tmp");
-    try_extract_stream(&entries, &xcfg, |i, b| {
+    try_extract_stream_in_pool(&pool, &entries, &xcfg, |i, b| {
         if let Some(mut b) = b {
             if deprio.as_ref().is_some_and(|g| g.matched_path_or_any_parents(&entries[i].rel, false).is_ignore()) {
                 b.flags |= fileflags::DEPRIORITIZED;
@@ -607,70 +619,146 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
     // definition / export differences of replaced, new and removed files
     let mut d_names: BTreeSet<String> = BTreeSet::new();
     let mut definitions_changed = false;
-    let mut export_changed: Vec<FileId> = Vec::new();
+    // File-wide export/visibility changes (star/default exports, removed files, Deref/TraitImpl/etc.)
+    // invalidate every direct/barrel importer of the file.
+    let mut broad_export_changed: Vec<FileId> = Vec::new();
+    // Symbol-level changes (renamed/modified definitions, return types, named exports) propagate
+    // surgically through re-exporting barrels and value forwarders without blowing up unrelated
+    // importers of the same package or barrel.
+    let mut symbol_export_changed: FxHashMap<u32, FxHashSet<String>> = FxHashMap::default();
+    // Rust field type changes (`owner.field.m()` where ref tail is `m`, not `field`).
+    let mut changed_rust_fields: FxHashSet<String> = FxHashSet::default();
     let mut remap: FxHashMap<u32, u32> = FxHashMap::default();
     // pytest injects a fixture by parameter name, with no import: a changed fixture re-resolves
     // the Python files of its directory and below
     let mut fixture_dirs: Vec<String> = Vec::new();
-    let fixture_dir = |view: &View, f: FileId, facts: &ResolverFactSig| -> Option<String> {
-        facts.iter().any(|fact| fact.0 == BindKind::Fixture as u8).then(|| cg_resolve::project::parent_dir(view.file(f).path()).to_owned())
+    let record_sym = |f: FileId, name: &str, d_names: &mut BTreeSet<String>, sym_map: &mut FxHashMap<u32, FxHashSet<String>>| {
+        if !name.is_empty() {
+            d_names.insert(name.to_owned());
+            sym_map.entry(f.0).or_default().insert(name.to_owned());
+        }
     };
     for (i, f) in ids.iter().enumerate() {
         let old = if states[i] == DeltaState::Replaced { defs_of(&base_view, *f) } else { BTreeMap::new() };
         let new = defs_of(&view1, *f);
         definitions_changed |= old != new;
-        if view1.file(*f).lang().family() == LangFamily::Js
-            && old.keys().chain(new.keys()).any(|key| {
-                matches!(NodeKind::from_u8(key.kind), Some(NodeKind::Function | NodeKind::Method | NodeKind::Component)) && old.get(key) != new.get(key)
-            })
-        {
-            // An exported value may depend on a function's return annotation.
-            export_changed.push(*f);
-        }
-        let old_facts = if states[i] == DeltaState::Replaced { resolver_fact_sig(&base_view, *f) } else { BTreeSet::new() };
-        let new_facts = resolver_fact_sig(&view1, *f);
-        let old_values = if states[i] == DeltaState::Replaced { js_value_fact_sig(&base_view, *f) } else { Vec::new() };
-        if old_values != js_value_fact_sig(&view1, *f) {
-            export_changed.push(*f);
-        }
-        if old_facts != new_facts {
-            definitions_changed = true;
-            d_names.extend(old_facts.iter().chain(&new_facts).map(|fact| fact.1.clone()));
-            export_changed.push(*f);
-            fixture_dirs.extend(fixture_dir(&view1, *f, &new_facts).or_else(|| fixture_dir(&view1, *f, &old_facts)));
-        }
+        let is_js = view1.file(*f).lang().family() == LangFamily::Js;
+        let mut changed_js_fns: Vec<String> = Vec::new();
         for (k, details) in &new {
-            // a changed signature can move a call to another overload of the name, even one
-            // whose target kept its identity
+            // a changed signature or return type can move a call to another overload or redirect a receiver
             if old.get(k) != Some(details) {
-                d_names.insert(k.name.clone());
+                record_sym(*f, &k.name, &mut d_names, &mut symbol_export_changed);
+                if is_js && matches!(NodeKind::from_u8(k.kind), Some(NodeKind::Function | NodeKind::Method | NodeKind::Component)) {
+                    changed_js_fns.push(k.name.clone());
+                }
             }
         }
         for k in old.keys() {
             if !new.contains_key(k) {
-                d_names.insert(k.name.clone());
+                record_sym(*f, &k.name, &mut d_names, &mut symbol_export_changed);
+                if is_js && matches!(NodeKind::from_u8(k.kind), Some(NodeKind::Function | NodeKind::Method | NodeKind::Component)) {
+                    changed_js_fns.push(k.name.clone());
+                }
+            }
+        }
+        if !changed_js_fns.is_empty() {
+            // A module-level value in the same file (`export const svc = make()`) may inherit a
+            // changed function's return annotation; record only bindings referencing a changed fn.
+            let scope = view1.scope_base(*f);
+            for b in view1.bindings_of(*f) {
+                if b.scope.0 == scope && (b.kind == BindKind::Local as u8 || b.kind == BindKind::Alias as u8) {
+                    let init = view1.text_str(b.init_ctor);
+                    if !init.is_empty() && changed_js_fns.iter().any(|name| init.contains(name.as_str())) {
+                        record_sym(*f, view1.text_str(b.name), &mut d_names, &mut symbol_export_changed);
+                    }
+                }
+            }
+        }
+        let old_facts = if states[i] == DeltaState::Replaced { resolver_fact_sig(&base_view, *f) } else { BTreeSet::new() };
+        let new_facts = resolver_fact_sig(&view1, *f);
+        let old_values: BTreeSet<_> = if states[i] == DeltaState::Replaced { js_value_fact_sig(&base_view, *f).into_iter().collect() } else { BTreeSet::new() };
+        let new_values: BTreeSet<_> = js_value_fact_sig(&view1, *f).into_iter().collect();
+        for v in old_values.symmetric_difference(&new_values) {
+            if v.1.is_empty() || v.1 == "default" {
+                broad_export_changed.push(*f);
+            } else {
+                record_sym(*f, &v.1, &mut d_names, &mut symbol_export_changed);
+            }
+        }
+        if old_facts != new_facts {
+            definitions_changed = true;
+            for fact in old_facts.symmetric_difference(&new_facts) {
+                let kind = fact.0;
+                record_sym(*f, &fact.1, &mut d_names, &mut symbol_export_changed);
+                if !fact.2.is_empty() {
+                    let owner_tail = fact.2.rsplit("::").next().unwrap_or(&fact.2);
+                    record_sym(*f, owner_tail, &mut d_names, &mut symbol_export_changed);
+                }
+                if kind == BindKind::Fixture as u8 {
+                    fixture_dirs.push(cg_resolve::project::parent_dir(view1.file(*f).path()).to_owned());
+                } else if kind == BindKind::Field as u8 {
+                    changed_rust_fields.insert(fact.1.clone());
+                } else if kind == BindKind::Mutation as u8 {
+                    // `obj.member = fn`: record both the full dotted name and the bare member tail.
+                    if let Some((_, tail)) = fact.1.rsplit_once('.') {
+                        record_sym(*f, tail, &mut d_names, &mut symbol_export_changed);
+                    }
+                } else if kind == BindKind::Deref as u8
+                    || kind == BindKind::FactoryMixin as u8
+                    || kind == BindKind::CommonJsObject as u8
+                    || kind == BindKind::MacroNamespace as u8
+                    || kind == BindKind::TraitImpl as u8
+                    || kind == BindKind::TypeAlias as u8
+                {
+                    broad_export_changed.push(*f);
+                }
             }
         }
         if states[i] == DeltaState::Replaced {
             pair_nodes(&base_view, &view1, *f, &mut remap);
-            if export_sig(&base_view, *f) != export_sig(&view1, *f)
-                || reexported_import_sig(&base_view, *f) != reexported_import_sig(&view1, *f)
-                || js_twin_order_sig(&base_view, *f) != js_twin_order_sig(&view1, *f)
-            {
-                export_changed.push(*f);
+            let old_exp: BTreeSet<_> = export_sig(&base_view, *f).into_iter().collect();
+            let new_exp: BTreeSet<_> = export_sig(&view1, *f).into_iter().collect();
+            for ex in old_exp.symmetric_difference(&new_exp) {
+                // Star exports, default exports, CommonJS module exports, or re-export spec changes
+                // can change arbitrary names in importers.
+                if ex.3 != 0 || ex.0.is_empty() || ex.0 == "default" || ex.0 == cg_extract::facts::COMMONJS_MODULE {
+                    broad_export_changed.push(*f);
+                } else {
+                    record_sym(*f, &ex.0, &mut d_names, &mut symbol_export_changed);
+                    if !ex.2.is_empty() {
+                        record_sym(*f, &ex.2, &mut d_names, &mut symbol_export_changed);
+                    }
+                }
+            }
+            let old_reimp = reexported_import_sig(&base_view, *f);
+            let new_reimp = reexported_import_sig(&view1, *f);
+            for imp in old_reimp.symmetric_difference(&new_reimp) {
+                if imp.0.is_empty() || imp.0 == "*" || imp.2 == "*" || imp.3 == cg_extract::ImportKind::Namespace as u8 {
+                    broad_export_changed.push(*f);
+                } else {
+                    record_sym(*f, &imp.0, &mut d_names, &mut symbol_export_changed);
+                }
+            }
+            if js_twin_order_sig(&base_view, *f) != js_twin_order_sig(&view1, *f) {
+                broad_export_changed.push(*f);
             }
         }
     }
     for f in &removed {
         let facts = resolver_fact_sig(&base_view, *f);
-        fixture_dirs.extend(fixture_dir(&base_view, *f, &facts));
-        d_names.extend(facts.into_iter().map(|fact| fact.1));
+        if facts.iter().any(|fact| fact.0 == BindKind::Fixture as u8) {
+            fixture_dirs.push(cg_resolve::project::parent_dir(base_view.file(*f).path()).to_owned());
+        }
+        for fact in facts {
+            d_names.insert(fact.1);
+        }
         for k in defs_of(&base_view, *f).keys() {
             d_names.insert(k.name.clone());
         }
-        export_changed.push(*f);
+        broad_export_changed.push(*f);
     }
-    let tail_ids: FxHashSet<u32> = d_names.iter().filter_map(|n| base.names.find(n.as_bytes())).map(|s| s.0).collect();
+    broad_export_changed.sort();
+    broad_export_changed.dedup();
     let is_dead = {
         let mut bits = vec![0u64; base.p.nodes_hot.len().div_ceil(64)];
         for n in &dead_nodes {
@@ -680,7 +768,7 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
     };
     // consumers (direct importers, through re-exporting barrels) of files whose exports changed
     let mut consumer_files: FxHashSet<u32> = FxHashSet::default();
-    if !export_changed.is_empty() {
+    if !broad_export_changed.is_empty() || !symbol_export_changed.is_empty() {
         let live: Vec<FileId> = view1.files().collect();
         let mut importers: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         let mut value_forwarders: FxHashSet<u32> = FxHashSet::default();
@@ -738,12 +826,12 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                 }
             }
         }
-        let mut frontier: Vec<u32> = export_changed.iter().map(|f| f.0).collect();
-        let mut seen: FxHashSet<u32> = frontier.iter().copied().collect();
-        while let Some(x) = frontier.pop() {
+        // 1. Broad file-wide export changes cascade unconditionally through barrels/forwarders.
+        let mut broad_frontier: Vec<u32> = broad_export_changed.iter().map(|f| f.0).collect();
+        let mut broad_seen: FxHashSet<u32> = broad_frontier.iter().copied().collect();
+        while let Some(x) = broad_frontier.pop() {
             for g in importers.get(&x).into_iter().flatten() {
                 consumer_files.insert(*g);
-                // a barrel passes the change on
                 let base_reexports = |g: u32, x: u32| -> bool {
                     (g as usize) < base.p.files.len() && {
                         let ff = base.p.file_facts[g as usize];
@@ -755,12 +843,104 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                         .values()
                         .any(|e| matches!(e, cg_resolve::ExportEntry::Re(y, _) | cg_resolve::ExportEntry::Module(y) if y.0 == x))
                     || base_reexports(*g, x);
-                if (reexports || value_forwarders.contains(g)) && seen.insert(*g) {
-                    frontier.push(*g);
+                if (reexports || value_forwarders.contains(g)) && broad_seen.insert(*g) {
+                    broad_frontier.push(*g);
+                }
+            }
+        }
+        // 2. Symbol-level export changes propagate only the affected symbol names through barrels,
+        //    re-export aliases (`export { make as create }`), and JS value forwarders, and only mark
+        //    importers that actually import one of those names (aliased or direct).
+        let mut sym_queue: Vec<(u32, String)> = Vec::new();
+        let mut sym_seen: FxHashSet<(u32, String)> = FxHashSet::default();
+        for (f, syms) in &symbol_export_changed {
+            if broad_seen.contains(f) {
+                continue;
+            }
+            for s in syms {
+                if sym_seen.insert((*f, s.clone())) {
+                    sym_queue.push((*f, s.clone()));
+                }
+            }
+        }
+        while let Some((x, sym)) = sym_queue.pop() {
+            for &g in importers.get(&x).into_iter().flatten() {
+                let gf = FileId(g);
+                // Direct/aliased import of `sym` from `x` marks `g` as a consumer.
+                let imports_sym = view1.imports_of(gf).iter().enumerate().any(|(ii, imp)| {
+                    let targets_x = engine.imp_targets[g as usize].get(ii).is_some_and(|t| match t {
+                        cg_resolve::ImportTarget::Pkg(pkg) => engine.modules.pkgs[pkg.0 as usize].files.iter().any(|file| file.0 == x),
+                        _ => engine.modules.target_file(*t).is_some_and(|file| file.0 == x),
+                    });
+                    if !targets_x {
+                        return false;
+                    }
+                    let imported = view1.text_str(imp.imported);
+                    let local = view1.text_str(imp.local);
+                    imported == sym || local == sym
+                });
+                if imports_sym {
+                    consumer_files.insert(g);
+                    // If `g` forwards computed JS values (e.g. `export const svc = make()`),
+                    // propagate only the exported value bindings whose initializer/type mentions
+                    // `sym` (or the local alias `g` imported `sym` under), not every unrelated
+                    // export in a large barrel/schema module.
+                    if value_forwarders.contains(&g) {
+                        let scope = view1.scope_base(gf);
+                        let local_names: Vec<&str> = view1
+                            .imports_of(gf)
+                            .iter()
+                            .filter(|imp| view1.text_str(imp.imported) == sym || view1.text_str(imp.local) == sym)
+                            .map(|imp| view1.text_str(imp.local))
+                            .collect();
+                        for b in view1.bindings_of(gf) {
+                            if b.scope.0 != scope || (b.kind != BindKind::Local as u8 && b.kind != BindKind::Alias as u8) {
+                                continue;
+                            }
+                            let init = view1.text_str(b.init_ctor);
+                            let dty = view1.text_str(b.decl_type);
+                            let mentions = init.contains(sym.as_str())
+                                || dty.contains(sym.as_str())
+                                || local_names.iter().any(|l| !l.is_empty() && (init.contains(*l) || dty.contains(*l)));
+                            if mentions {
+                                let bname = view1.text_str(b.name);
+                                if engine.exports[g as usize].contains_key(bname) {
+                                    d_names.insert(bname.to_owned());
+                                    if sym_seen.insert((g, bname.to_owned())) {
+                                        sym_queue.push((g, bname.to_owned()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Star re-export (`export * from './x'`) passes `sym` unchanged.
+                if engine.stars[g as usize].iter().any(|y| y.0 == x) && sym_seen.insert((g, sym.clone())) {
+                    sym_queue.push((g, sym.clone()));
+                }
+                // Named re-export (`export { make as create } from './x'` or `export * as ns from './x'`).
+                for (exp_name, entry) in &engine.exports[g as usize] {
+                    match entry {
+                        cg_resolve::ExportEntry::Re(y, orig) if y.0 == x && view1.text_str(*orig) == sym => {
+                            consumer_files.insert(g);
+                            d_names.insert((*exp_name).to_owned());
+                            if sym_seen.insert((g, (*exp_name).to_owned())) {
+                                sym_queue.push((g, (*exp_name).to_owned()));
+                            }
+                        }
+                        cg_resolve::ExportEntry::Module(y) if y.0 == x && sym_seen.insert((g, sym.clone())) => {
+                            // `pub mod x` / `export * as ns from './x'`: callers access `ns.sym`,
+                            // already matched by `d_names`; propagate `sym` (not the module name
+                            // itself, which would cascade to every unrelated user of the module).
+                            sym_queue.push((g, sym.clone()));
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
     }
+    let tail_ids: FxHashSet<u32> = d_names.iter().filter_map(|n| base.names.find(n.as_bytes())).map(|s| s.0).collect();
     for dir in &fixture_dirs {
         for (fi, rec) in base.p.files.iter().enumerate() {
             let path = base.paths.get(rec.path);
@@ -805,16 +985,21 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
             }
         }
         if !file_hit {
+            let check_rust_fields = !changed_rust_fields.is_empty() && cg_core::Lang::from_u8(rec.lang) == cg_core::Lang::Rust;
             for i in 0..rec.ref_count {
                 let r = &base.p.refs[(rec.ref_start + i) as usize];
                 let by_tail = tail_ids.contains(&r.tail.0);
                 let by_dead = r.status == status::RESOLVED && is_dead(r.target.0) && !remap.contains_key(&r.target.0);
-                if by_tail || by_dead {
+                let by_field = check_rust_fields && {
+                    let name = base.text.get(r.name);
+                    name.contains('.') && name.split('.').any(|seg| changed_rust_fields.contains(seg))
+                };
+                if by_tail || by_dead || by_field {
                     file_hit = true;
                     hit_tail += by_tail as usize;
                     hit_dead += by_dead as usize;
                     if debug {
-                        eprintln!("sync: {} hit by {} ref {:?}", base.paths.get(rec.path), if by_tail { "tail" } else { "dead target" }, base.text.get(r.name));
+                        eprintln!("sync: {} hit by {} ref {:?}", base.paths.get(rec.path), if by_tail { "tail" } else { "dead/field" }, base.text.get(r.name));
                     }
                     break;
                 }
@@ -843,9 +1028,28 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
     }
     // (the files' own refs of C files are in `affected` already via view1.ref_range)
 
+    let file_of = |id: u32| -> FileId { view1.hot(view1.reference(id).from).file };
+    // Early threshold bailout BEFORE spending time on resolution & synthesis when the initial
+    // affected set already exceeds delta limits.
+    let check_thresholds = |affected: &FxHashSet<u32>, rep: &mut SyncReport| -> Option<String> {
+        let affected_base_files: BTreeSet<u32> =
+            affected.iter().filter(|id| **id < n_base_refs).map(|id| file_of(*id).0).filter(|f| !c_files.contains(f)).collect();
+        rep.affected_refs = affected.len();
+        rep.affected_files = affected_base_files.len() + ids.len();
+        if affected.len() * 100 > (n_base_refs as usize).max(1) * MAX_AFFECTED_REF_PCT && n_base_refs > 2000 {
+            return Some(format!("{} of {} references affected", affected.len(), n_base_refs));
+        }
+        if rep.affected_files * 100 > n_base_files.max(1) * MAX_AFFECTED_FILE_PCT && n_base_files >= 40 {
+            return Some(format!("{} of {} files affected", rep.affected_files, n_base_files));
+        }
+        None
+    };
+    if let Some(why) = check_thresholds(&affected, &mut rep) {
+        return full_rebuild(store, guard, root, opts, rep, why);
+    }
+
     // ---- 3b. resolve, widening when imports or the hierarchy change ----
     let all_files: Vec<FileId> = view1.files().collect();
-    let file_of = |id: u32| -> FileId { view1.hot(view1.reference(id).from).file };
     let mut outcomes: FxHashMap<u32, Outcome> = FxHashMap::default();
     {
         // round 1: imports, supertypes, type references
@@ -907,6 +1111,9 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                 }
             }
         }
+        if let Some(why) = check_thresholds(&affected, &mut rep) {
+            return full_rebuild(store, guard, root, opts, rep, why);
+        }
     }
     let todo2: FxHashSet<u32> = affected.iter().copied().filter(|id| round_of(view1.reference(*id).kind) == Round_::Two).collect();
     if !todo2.is_empty() {
@@ -927,7 +1134,12 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
             &base_view,
             &c_files,
             &remap,
-            hierarchy_changed || definitions_changed || !export_changed.is_empty() || hit_imports > 0 || !removed.is_empty(),
+            hierarchy_changed
+                || definitions_changed
+                || !broad_export_changed.is_empty()
+                || !symbol_export_changed.is_empty()
+                || hit_imports > 0
+                || !removed.is_empty(),
         )
     });
     let mut synth_by_file: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
@@ -994,21 +1206,11 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
         }
     }
 
-    // ---- thresholds ----
+    // ---- 4. assemble the delta ----
     let affected_base_files: BTreeSet<u32> =
         affected.iter().filter(|id| **id < n_base_refs).map(|id| file_of(*id).0).filter(|f| !c_files.contains(f)).collect();
     rep.affected_refs = affected.len();
     rep.affected_files = affected_base_files.len() + ids.len();
-    if affected.len() * 100 > (n_base_refs as usize).max(1) * MAX_AFFECTED_REF_PCT && n_base_refs > 2000 {
-        let why = format!("{} of {} references affected", affected.len(), n_base_refs);
-        return full_rebuild(store, guard, root, opts, rep, why);
-    }
-    if rep.affected_files * 100 > n_base_files.max(1) * MAX_AFFECTED_FILE_PCT && n_base_files >= 40 {
-        let why = format!("{} of {} files affected", rep.affected_files, n_base_files);
-        return full_rebuild(store, guard, root, opts, rep, why);
-    }
-
-    // ---- 4. assemble the delta ----
     // edges-only files: unchanged content, rewritten refs/edges (plus touched files)
     let mut eo_set: BTreeSet<u32> = affected_base_files.clone();
     eo_set.extend(synth_dirty.iter().copied());

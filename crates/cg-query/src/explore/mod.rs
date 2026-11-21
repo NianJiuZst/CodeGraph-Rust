@@ -204,24 +204,8 @@ impl Graph {
                 exact.insert(*n);
             }
         }
-        // search: the whole query, then each word on its own
-        let mut seeds: FxHashMap<NodeIdx, f32> = FxHashMap::default();
-        let mut add_hits = |hits: Vec<crate::search::Hit>, w: f32| {
-            let max = hits.first().map_or(1.0, |h| h.score).max(1.0);
-            for h in hits {
-                let s = (h.score / max).min(1.0) * w;
-                let e = seeds.entry(h.node).or_insert(0.0);
-                if s > *e {
-                    *e = s;
-                }
-            }
-        };
-        if !words.is_empty() {
-            add_hits(self.search_tokens(&words, &SearchOptions { limit: 24, ..Default::default() }), 0.9);
-            for t in &words {
-                add_hits(self.search_tokens(std::slice::from_ref(t), &SearchOptions { limit: 8, ..Default::default() }), 0.8);
-            }
-        }
+        // search: single pass computes both whole-query and per-word top seeds
+        let seeds = self.search_for_explore(&words, 24, 8);
         for (n, s) in seeds {
             if s >= 0.3 {
                 rel.insert(n, s);

@@ -49,8 +49,9 @@ fn identity(e: &EdgeBuild) -> (u32, u8, u32, u32, u32) {
 /// Stable LSD radix sorting of the integer identity, followed by comparison sorting only
 /// inside duplicate groups to preserve class / pass precedence. Constant bytes are skipped.
 fn sort_edges(edges: &mut Vec<EdgeBuild>) {
+    const MAX_RADIX_SCRATCH: usize = 64 << 20;
     let scratch_bytes = edges.len().saturating_mul(std::mem::size_of::<EdgeBuild>());
-    if edges.len() < 32_768 || scratch_bytes as u64 > cg_core::budget::MemBudget::detect().extract / 2 {
+    if edges.len() < 32_768 || scratch_bytes > MAX_RADIX_SCRATCH {
         edges.par_sort_unstable_by(cmp);
         return;
     }

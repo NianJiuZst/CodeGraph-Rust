@@ -93,15 +93,30 @@ pub fn parent_dir(p: &str) -> &str {
     p.rfind('/').map(|i| &p[..i]).unwrap_or("")
 }
 
+fn parse_json(text: &str) -> Option<Value> {
+    jsonc_parser::parse_to_serde_value(text, &Default::default()).ok().flatten()
+}
+
 fn read_json(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
-    jsonc_parser::parse_to_serde_value(&text, &Default::default()).ok().flatten()
+    parse_json(&text)
 }
 
 impl ProjectInfo {
     pub fn load(root: &Path, config: &ProjectConfig) -> ProjectInfo {
         let files = find_config_files(root, config, 8);
         Self::load_known(root, &files)
+    }
+
+    /// Hash known configuration files without parsing JSON/TOML (fast check for up-to-date sync).
+    pub fn hash_known(root: &Path, files: &[String]) -> BTreeMap<String, u64> {
+        let mut hashes = BTreeMap::new();
+        for rel in files {
+            if let Ok(bytes) = std::fs::read(root.join(rel)) {
+                hashes.insert(rel.clone(), hash::hash64(&bytes));
+            }
+        }
+        hashes
     }
 
     /// A watcher already knows the configuration file set. Ordinary source edits need no
@@ -117,7 +132,7 @@ impl ProjectInfo {
             let text = String::from_utf8_lossy(&bytes);
             match name {
                 "package.json" => {
-                    if let Some(v) = read_json(&abs) {
+                    if let Some(v) = parse_json(&text) {
                         info.packages.push(parse_package(&dir, &v));
                     }
                 }

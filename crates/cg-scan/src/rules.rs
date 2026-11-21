@@ -9,9 +9,9 @@
 use cg_core::config::ProjectConfig;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::Match;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 /// Directory names skipped everywhere (upstream `DEFAULT_IGNORE_DIRS`).
 pub const DEFAULT_IGNORE_DIRS: &[&str] = &[
@@ -113,13 +113,14 @@ pub struct IgnoreRules {
     root: PathBuf,
     defaults: Gitignore,
     exclude: Gitignore,
+    has_exclude: bool,
     include: Gitignore,
     has_include: bool,
     jvm_build: Gitignore,
     /// Global excludes file + `.git/info/exclude`.
     base_user: Vec<Gitignore>,
-    /// Per-directory `.gitignore`, loaded on first use.
-    nested: Mutex<HashMap<PathBuf, Option<Arc<Gitignore>>>>,
+    /// Per-directory `.gitignore`, loaded on first use (keyed by repo-relative dir path, `""` for root).
+    nested: RwLock<FxHashMap<String, Option<Arc<Gitignore>>>>,
 }
 
 fn build(root: &Path, patterns: &[String]) -> Gitignore {
@@ -130,16 +131,92 @@ fn build(root: &Path, patterns: &[String]) -> Gitignore {
     b.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
-fn global_excludes_file() -> Option<PathBuf> {
-    if let Some(out) = std::process::Command::new("git").args(["config", "--global", "core.excludesFile"]).output().ok().filter(|o| o.status.success()) {
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !s.is_empty() {
-            let p = if let Some(rest) = s.strip_prefix("~/") { PathBuf::from(std::env::var_os("HOME")?).join(rest) } else { PathBuf::from(s) };
-            return Some(p);
+fn expand_tilde(s: &str) -> Option<PathBuf> {
+    if let Some(rest) = s.strip_prefix("~/") {
+        Some(PathBuf::from(std::env::var_os("HOME")?).join(rest))
+    } else {
+        Some(PathBuf::from(s))
+    }
+}
+
+/// Fast-path reader for `[core] excludesFile` in a gitconfig file without spawning `git`.
+/// Returns `None` if the file contains `[include` directives (caller falls back to `git config`).
+fn parse_gitconfig_excludes(text: &str) -> Option<Option<String>> {
+    let mut in_core = false;
+    let mut found: Option<String> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') {
+            let lower = line.to_ascii_lowercase();
+            if lower.starts_with("[include") {
+                return None;
+            }
+            in_core = lower.starts_with("[core]") || lower.starts_with("[core ");
+            continue;
+        }
+        if in_core {
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("excludesfile") {
+                    let mut val = v.trim();
+                    if let Some(stripped) = val.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                        val = stripped;
+                    } else {
+                        if let Some(i) = val.find(['#', ';']) {
+                            val = val[..i].trim();
+                        }
+                    }
+                    if !val.is_empty() {
+                        found = Some(val.to_owned());
+                    }
+                }
+            }
         }
     }
-    let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(xdg.join("git").join("ignore"))
+    Some(found)
+}
+
+fn global_excludes_file() -> Option<PathBuf> {
+    let xdg_cfg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    let candidates: Vec<PathBuf> = if let Some(p) = std::env::var_os("GIT_CONFIG_GLOBAL") {
+        vec![PathBuf::from(p)]
+    } else {
+        let mut v = Vec::new();
+        if let Some(xdg) = &xdg_cfg {
+            v.push(xdg.join("git").join("config"));
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            v.push(PathBuf::from(home).join(".gitconfig"));
+        }
+        v
+    };
+    let mut need_git = false;
+    let mut found: Option<String> = None;
+    for cfg_path in &candidates {
+        if let Ok(text) = std::fs::read_to_string(cfg_path) {
+            match parse_gitconfig_excludes(&text) {
+                Some(Some(val)) => found = Some(val),
+                Some(None) => {}
+                None => {
+                    need_git = true;
+                    break;
+                }
+            }
+        }
+    }
+    if need_git {
+        if let Some(out) = std::process::Command::new("git").args(["config", "--global", "core.excludesFile"]).output().ok().filter(|o| o.status.success()) {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return expand_tilde(&s);
+            }
+        }
+    } else if let Some(s) = found {
+        return expand_tilde(&s);
+    }
+    Some(xdg_cfg?.join("git").join("ignore"))
 }
 
 impl IgnoreRules {
@@ -164,65 +241,73 @@ impl IgnoreRules {
             root: root.to_path_buf(),
             defaults: build(root, &default_patterns()),
             exclude: build(root, &cfg.exclude),
+            has_exclude: !cfg.exclude.is_empty(),
             include: build(root, &cfg.include),
             has_include: !cfg.include.is_empty(),
             jvm_build: build(root, &JVM_BUILD_PACKAGE_DIRS.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
             base_user,
-            nested: Mutex::new(HashMap::new()),
+            nested: RwLock::new(FxHashMap::default()),
         }
     }
 
-    fn dir_gitignore(&self, dir: &Path) -> Option<Arc<Gitignore>> {
-        let mut map = self.nested.lock().unwrap();
-        if let Some(v) = map.get(dir) {
-            return v.clone();
+    fn dir_gitignore(&self, rel_dir: &str) -> Option<Arc<Gitignore>> {
+        if let Ok(map) = self.nested.read() {
+            if let Some(v) = map.get(rel_dir) {
+                return v.clone();
+            }
         }
+        let dir = if rel_dir.is_empty() { self.root.clone() } else { self.root.join(rel_dir) };
         let file = dir.join(".gitignore");
         let loaded = if file.is_file() {
-            let mut b = GitignoreBuilder::new(dir);
+            let mut b = GitignoreBuilder::new(&dir);
             let _ = b.add(&file);
             b.build().ok().filter(|g| !g.is_empty()).map(Arc::new)
         } else {
             None
         };
-        map.insert(dir.to_path_buf(), loaded.clone());
-        loaded
+        let mut map = self.nested.write().unwrap();
+        map.entry(rel_dir.to_owned()).or_insert_with(|| loaded.clone()).clone()
     }
 
     /// State of `rel` (one path, not its parents) in the user layers: Some(true) = ignored,
     /// Some(false) = whitelisted by a `!` rule, None = no rule.
-    fn user_state(&self, rel: &str, is_dir: bool) -> Option<bool> {
-        let abs = self.root.join(rel);
+    fn user_state(&self, rel: &str, abs: &Path, is_dir: bool) -> Option<bool> {
         let mut state = None;
         for g in &self.base_user {
-            match g.matched(&abs, is_dir) {
+            match g.matched(abs, is_dir) {
                 Match::Ignore(_) => state = Some(true),
                 Match::Whitelist(_) => state = Some(false),
                 Match::None => {}
             }
         }
         // .gitignore files from the root down to the path's directory; deeper wins.
-        let mut dir = self.root.clone();
-        let comps: Vec<&str> = rel.split('/').collect();
-        let mut chain = vec![dir.clone()];
-        for c in &comps[..comps.len().saturating_sub(1)] {
-            dir = dir.join(c);
-            chain.push(dir.clone());
+        if let Some(g) = self.dir_gitignore("") {
+            match g.matched(abs, is_dir) {
+                Match::Ignore(_) => state = Some(true),
+                Match::Whitelist(_) => state = Some(false),
+                Match::None => {}
+            }
         }
-        for d in chain {
-            if let Some(g) = self.dir_gitignore(&d) {
-                match g.matched(&abs, is_dir) {
-                    Match::Ignore(_) => state = Some(true),
-                    Match::Whitelist(_) => state = Some(false),
-                    Match::None => {}
+        let mut idx = 0;
+        let bytes = rel.as_bytes();
+        while let Some(off) = memchr::memchr(b'/', &bytes[idx..]) {
+            let slash = idx + off;
+            if slash > 0 {
+                if let Some(g) = self.dir_gitignore(&rel[..slash]) {
+                    match g.matched(abs, is_dir) {
+                        Match::Ignore(_) => state = Some(true),
+                        Match::Whitelist(_) => state = Some(false),
+                        Match::None => {}
+                    }
                 }
             }
+            idx = slash + 1;
         }
         state
     }
 
-    fn default_state(&self, rel: &str, is_dir: bool) -> Option<bool> {
-        match self.defaults.matched(self.root.join(rel), is_dir) {
+    fn default_state(&self, abs: &Path, is_dir: bool) -> Option<bool> {
+        match self.defaults.matched(abs, is_dir) {
             Match::Ignore(_) => Some(true),
             Match::Whitelist(_) => Some(false),
             Match::None => None,
@@ -231,15 +316,31 @@ impl IgnoreRules {
 
     /// Whether this single path is excluded by the rules (parents are *not* consulted).
     fn path_ignored(&self, rel: &str, is_dir: bool) -> bool {
-        if self.exclude.matched(self.root.join(rel), is_dir).is_ignore() {
+        let abs = self.root.join(rel);
+        if self.has_exclude && self.exclude.matched(&abs, is_dir).is_ignore() {
             return true;
         }
-        let user = self.user_state(rel, is_dir);
+        let user = self.user_state(rel, &abs, is_dir);
         match user {
-            Some(true) => !(self.has_include && self.include.matched(self.root.join(rel), is_dir).is_ignore()),
+            Some(true) => !(self.has_include && self.include.matched(&abs, is_dir).is_ignore()),
             Some(false) => false, // explicitly revived, also revives built-in skips
-            None => self.default_state(rel, is_dir) == Some(true),
+            None => self.default_state(&abs, is_dir) == Some(true),
         }
+    }
+
+    /// Fast entry check for tree walkers that have already verified every ancestor directory is
+    /// not ignored (so parents are not re-evaluated).
+    pub fn is_entry_ignored(&self, rel: &str, is_dir: bool) -> bool {
+        if rel == ".git" || rel == cg_core::brand::DATA_DIR {
+            return true;
+        }
+        if self.path_ignored(rel, is_dir) {
+            return true;
+        }
+        if !is_dir && self.under_src_build(rel) && !self.in_jvm_build_package(rel) {
+            return !is_hand_written_source(rel);
+        }
+        false
     }
 
     /// Is the repo-relative path (forward slashes) kept out of the index? A path inside an
@@ -248,18 +349,17 @@ impl IgnoreRules {
         if rel == ".git" || rel.starts_with(".git/") || rel == cg_core::brand::DATA_DIR || rel.starts_with(".cgr/") {
             return true;
         }
-        let comps: Vec<&str> = rel.split('/').filter(|c| !c.is_empty()).collect();
-        let mut prefix = String::new();
-        for (i, c) in comps.iter().enumerate() {
-            if !prefix.is_empty() {
-                prefix.push('/');
-            }
-            prefix.push_str(c);
-            let last = i + 1 == comps.len();
-            let dir = !last || is_dir;
-            if self.path_ignored(&prefix, dir) {
+        let mut idx = 0;
+        let bytes = rel.as_bytes();
+        while let Some(off) = memchr::memchr(b'/', &bytes[idx..]) {
+            let slash = idx + off;
+            if slash > 0 && self.path_ignored(&rel[..slash], true) {
                 return true;
             }
+            idx = slash + 1;
+        }
+        if !rel.is_empty() && !rel.ends_with('/') && self.path_ignored(rel, is_dir) {
+            return true;
         }
         // A `build` directory below `src/` is walked, but only hand-written sources count.
         if !is_dir && self.under_src_build(rel) && !self.in_jvm_build_package(rel) {
@@ -269,9 +369,24 @@ impl IgnoreRules {
     }
 
     fn under_src_build(&self, rel: &str) -> bool {
-        let comps: Vec<&str> = rel.split('/').collect();
-        let Some(src) = comps.iter().position(|c| *c == "src") else { return false };
-        comps[src + 1..comps.len().saturating_sub(1)].contains(&"build")
+        if !rel.contains("/build/") && !rel.starts_with("src/build/") {
+            return false;
+        }
+        let mut saw_src = false;
+        let mut it = rel.split('/').peekable();
+        while let Some(c) = it.next() {
+            if it.peek().is_none() {
+                break; // filename, not a directory component
+            }
+            if !saw_src {
+                if c == "src" {
+                    saw_src = true;
+                }
+            } else if c == "build" {
+                return true;
+            }
+        }
+        false
     }
 
     fn in_jvm_build_package(&self, rel: &str) -> bool {
@@ -308,29 +423,29 @@ impl IgnoreRules {
 
     /// Does `rel` match config `exclude`?
     pub fn matches_exclude(&self, rel: &str, is_dir: bool) -> bool {
-        self.exclude.matched_path_or_any_parents(self.root.join(rel), is_dir).is_ignore()
+        self.has_exclude && self.exclude.matched_path_or_any_parents(self.root.join(rel), is_dir).is_ignore()
     }
 
     /// Built-in-only check used for `include`d and tracked-but-ignored files: only the
     /// default skips and config `exclude` apply.
     pub fn builtin_ignored(&self, rel: &str, is_dir: bool) -> bool {
-        if rel == ".git" || rel.starts_with(".git/") || rel.starts_with(".cgr/") {
+        if rel == ".git" || rel.starts_with(".git/") || rel == cg_core::brand::DATA_DIR || rel.starts_with(".cgr/") {
             return true;
         }
         if self.matches_exclude(rel, is_dir) {
             return true;
         }
-        let comps: Vec<&str> = rel.split('/').filter(|c| !c.is_empty()).collect();
-        let mut prefix = String::new();
-        for (i, c) in comps.iter().enumerate() {
-            if !prefix.is_empty() {
-                prefix.push('/');
-            }
-            prefix.push_str(c);
-            let dir = i + 1 < comps.len() || is_dir;
-            if self.default_state(&prefix, dir) == Some(true) {
+        let mut idx = 0;
+        let bytes = rel.as_bytes();
+        while let Some(off) = memchr::memchr(b'/', &bytes[idx..]) {
+            let slash = idx + off;
+            if slash > 0 && self.default_state(&self.root.join(&rel[..slash]), true) == Some(true) {
                 return true;
             }
+            idx = slash + 1;
+        }
+        if !rel.is_empty() && !rel.ends_with('/') && self.default_state(&self.root.join(rel), is_dir) == Some(true) {
+            return true;
         }
         if !is_dir && self.under_src_build(rel) && !self.in_jvm_build_package(rel) {
             return !is_hand_written_source(rel);

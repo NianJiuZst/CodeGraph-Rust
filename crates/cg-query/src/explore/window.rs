@@ -122,13 +122,35 @@ pub fn range_cost(cost: &[u32], a: u32, b: u32) -> usize {
     (cost[b] - cost[a - 1]) as usize
 }
 
+#[inline]
+fn decimal_digits(n: usize) -> u32 {
+    if n < 10 {
+        1
+    } else if n < 100 {
+        2
+    } else if n < 1_000 {
+        3
+    } else if n < 10_000 {
+        4
+    } else if n < 100_000 {
+        5
+    } else if n < 1_000_000 {
+        6
+    } else {
+        7
+    }
+}
+
 pub fn line_costs(lines: &crate::source::SourceView) -> Vec<u32> {
-    let mut cost = Vec::with_capacity(lines.len() + 1);
+    let len = lines.len();
+    let mut cost = Vec::with_capacity(len + 1);
     cost.push(0u32);
     let mut acc = 0u32;
-    for i in 0..lines.len() {
-        cg_core::cancel::check();
-        let digits = ((i + 1) as f64).log10().floor() as u32 + 1;
+    for i in 0..len {
+        if i & 127 == 0 {
+            cg_core::cancel::check();
+        }
+        let digits = decimal_digits(i + 1);
         acc += lines[i].len() as u32 + digits + 2;
         cost.push(acc);
     }
@@ -172,33 +194,46 @@ pub fn plan(wants: Vec<Want>, gap: u32, cost: &[u32], cap: usize) -> Vec<Range> 
 /// Render ranges as `<n>\t<line>` blocks joined by gap markers (named when the hole holds
 /// indexed symbols).
 pub fn render(g: &Graph, f: cg_core::FileId, lines: &crate::source::SourceView, ranges: &[Range]) -> String {
-    let mut out = String::new();
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(ranges.iter().map(|r| (r.end.saturating_sub(r.start) as usize + 1) * 48).sum());
     let mut prev_end: Option<u32> = None;
-    // symbols for named gaps
-    let nodes: Vec<(String, u32, u32)> = g
-        .view
-        .nodes_in_file(f)
-        .map(NodeIdx)
-        .filter(|n| g.kind(*n).is_definition() && !matches!(g.kind(*n), NodeKind::Property | NodeKind::Field | NodeKind::Variable | NodeKind::Constant))
-        .map(|n| (g.name(n).to_owned(), g.line(n), g.end_line(n)))
-        .collect();
+    // symbols for named gaps — only needed when there are multiple ranges
+    let nodes: Vec<(&str, u32, u32)> = if ranges.len() > 1 {
+        g.view
+            .nodes_in_file(f)
+            .map(NodeIdx)
+            .filter(|n| g.kind(*n).is_definition() && !matches!(g.kind(*n), NodeKind::Property | NodeKind::Field | NodeKind::Variable | NodeKind::Constant))
+            .map(|n| (g.name(n), g.line(n), g.end_line(n)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let line_count = lines.len() as u32;
     for r in ranges {
         if let Some(pe) = prev_end {
-            let elided: Vec<&(String, u32, u32)> = nodes.iter().filter(|(_, s, e)| *s > pe && *e < r.start).collect();
+            let elided: Vec<&(&str, u32, u32)> = nodes.iter().filter(|(_, s, e)| *s > pe && *e < r.start).collect();
             if elided.is_empty() {
                 out.push_str(crate::strings::BARE_GAP_MARKER);
             } else {
                 let path = g.path(f);
-                let shown: Vec<String> = elided.iter().take(6).map(|(n, s, _)| format!("{n} ({path}:{s})")).collect();
-                let more = if elided.len() > 6 { format!(", +{} more", elided.len() - 6) } else { String::new() };
-                out.push_str(&format!("\n\n... (gap: {}{more}) ...\n\n", shown.join(", ")));
+                out.push_str("\n\n... (gap: ");
+                for (i, (n, s, _)) in elided.iter().take(6).enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    let _ = write!(out, "{n} ({path}:{s})");
+                }
+                if elided.len() > 6 {
+                    let _ = write!(out, ", +{} more", elided.len() - 6);
+                }
+                out.push_str(") ...\n\n");
             }
         }
-        for n in r.start..=r.end.min(lines.len() as u32) {
-            out.push_str(&n.to_string());
-            out.push('\t');
+        let end = r.end.min(line_count);
+        for n in r.start..=end {
+            let _ = write!(out, "{n}\t");
             out.push_str(&lines[(n - 1) as usize]);
-            if n != r.end.min(lines.len() as u32) {
+            if n != end {
                 out.push('\n');
             }
         }

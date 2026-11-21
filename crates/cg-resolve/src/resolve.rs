@@ -323,7 +323,7 @@ impl<'e, 'v> WorkerCx<'e, 'v> {
         if bytes > limit {
             return rc;
         }
-        while self.cache.len() >= 6 || self.cache_bytes.saturating_add(bytes) > limit {
+        while self.cache.len() >= 64 || self.cache_bytes.saturating_add(bytes) > limit {
             let (_, _, evicted) = self.cache.remove(0);
             self.cache_bytes -= evicted;
         }

@@ -9,6 +9,7 @@ license.workspace = true
 cg-core = { workspace = true }
 ignore = { workspace = true }
 globset = { workspace = true }
+memchr = { workspace = true }
 rayon = { workspace = true }
 regex = { workspace = true }
 rustc-hash = { workspace = true }

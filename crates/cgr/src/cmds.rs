@@ -418,7 +418,7 @@ pub fn serve(base: Option<PathBuf>, http: Option<String>, token: Option<String>,
     let cfg = cg_mcp::Config { path: cfg_path.clone(), tools: cg_mcp::defs::allowlist_from_env(), dedup };
     let server = cg_mcp::Server::new(cfg);
     server.set_rebuild_hook(std::sync::Arc::new(|root: &Path| {
-        let _ = cg_resolve::index_project(root, &Default::default());
+        let _ = cg_resolve::index_project(root, &cg_resolve::IndexOptions { low_priority: true, ..Default::default() });
     }));
     server.set_status_hook(std::sync::Arc::new(|p: &Project| cg_sync::measure_changes(p.root(), &p.snap.view).ok().map(|c| c.describe())));
     let watchers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, cg_sync::WatchHandle>>> = Default::default();
@@ -427,7 +427,8 @@ pub fn serve(base: Option<PathBuf>, http: Option<String>, token: Option<String>,
         server.set_open_hook(std::sync::Arc::new(move |root: &Path| {
             let mut map = w.lock().unwrap_or_else(|e| e.into_inner());
             if !map.contains_key(root) {
-                map.insert(root.to_path_buf(), cg_sync::spawn_watcher(root.to_path_buf(), Default::default()));
+                let bg = cg_sync::SyncOptions { index: cg_resolve::IndexOptions { low_priority: true, ..Default::default() }, ..Default::default() };
+                map.insert(root.to_path_buf(), cg_sync::spawn_watcher(root.to_path_buf(), bg));
             }
         }));
         let w = watchers.clone();

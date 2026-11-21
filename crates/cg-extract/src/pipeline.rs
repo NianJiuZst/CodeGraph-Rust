@@ -9,7 +9,6 @@ use crate::rows::FileRows;
 use cg_core::{hash, Lang};
 use cg_kernel::{EmitOut, ExtractOptions, KernelError};
 use cg_scan::{generated, lang as scanlang, testpath, FileEntry};
-use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -396,10 +395,17 @@ pub fn extract_stream(entries: &[FileEntry], cfg: &ExtractConfig, mut sink: impl
     }
 }
 
-/// Fallible sink variant. Stops before starting the next batch if a spill or downstream
-/// write fails, instead of retaining the rest of the repository in memory.
-pub fn try_extract_stream<E>(entries: &[FileEntry], cfg: &ExtractConfig, mut sink: impl FnMut(usize, Option<FileBatch>) -> Result<(), E>) -> Result<(), E> {
-    let pool = build_pool(cfg);
+/// Fallible sink variant using a caller-owned Rayon pool. Processes each batch in descending
+/// file-size order using a dynamic atomic work cursor (LPT scheduling) so every worker thread
+/// stays balanced and large files never form tail stragglers, while delivering results to `sink`
+/// in deterministic input order.
+pub fn try_extract_stream_in_pool<E>(
+    pool: &rayon::ThreadPool,
+    entries: &[FileEntry],
+    cfg: &ExtractConfig,
+    mut sink: impl FnMut(usize, Option<FileBatch>) -> Result<(), E>,
+) -> Result<(), E> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     let mut start = 0usize;
     while start < entries.len() {
         let mut end = start;
@@ -408,13 +414,34 @@ pub fn try_extract_stream<E>(entries: &[FileEntry], cfg: &ExtractConfig, mut sin
             bytes += entries[end].size;
             end += 1;
         }
-        let results: Vec<Option<FileBatch>> = pool.install(|| entries[start..end].par_iter().map(|e| extract_one(e, cfg)).collect());
-        for (i, r) in results.into_iter().enumerate() {
+        let batch = &entries[start..end];
+        let mut order: Vec<usize> = (0..batch.len()).collect();
+        order.sort_unstable_by(|&a, &b| batch[b].size.cmp(&batch[a].size).then(a.cmp(&b)));
+        let cursor = AtomicUsize::new(0);
+        let slots: Vec<Mutex<Option<FileBatch>>> = (0..batch.len()).map(|_| Mutex::new(None)).collect();
+        pool.broadcast(|_| loop {
+            let pos = cursor.fetch_add(1, Ordering::Relaxed);
+            if pos >= order.len() {
+                break;
+            }
+            let idx = order[pos];
+            let res = extract_one(&batch[idx], cfg);
+            *slots[idx].lock().unwrap_or_else(|e| e.into_inner()) = res;
+        });
+        for (i, slot) in slots.into_iter().enumerate() {
+            let r = slot.into_inner().unwrap_or_else(|e| e.into_inner());
             sink(start + i, r)?;
         }
         start = end;
     }
     Ok(())
+}
+
+/// Fallible sink variant. Stops before starting the next batch if a spill or downstream
+/// write fails, instead of retaining the rest of the repository in memory.
+pub fn try_extract_stream<E>(entries: &[FileEntry], cfg: &ExtractConfig, sink: impl FnMut(usize, Option<FileBatch>) -> Result<(), E>) -> Result<(), E> {
+    let pool = build_pool(cfg);
+    try_extract_stream_in_pool(&pool, entries, cfg, sink)
 }
 
 /// Convenience: all batches in memory, aligned with `entries`.

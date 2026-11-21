@@ -59,45 +59,56 @@ fn group_pairs<K: PartialEq + Clone>(pairs: &[(K, u32)]) -> (Vec<K>, Vec<u32>, V
 /// `has_post(id)`: does the name string have any node posting (definitions only)?
 pub fn build_name_indexes(names: &StrPool, has_post: impl Fn(usize) -> bool + Sync) -> NameIndexes {
     let ids: Vec<u32> = (0..names.len() as u32).into_par_iter().filter(|i| has_post(*i as usize)).collect();
-    let names_fst = fst_from_sorted(ids.iter().map(|i| (names.bytes(StrId(*i)), *i as u64)));
 
-    // lower-case -> original names
-    let mut lower: Vec<(String, u32)> = ids.par_iter().map(|i| (names.get(StrId(*i)).to_lowercase(), *i)).collect();
-    lower.par_sort_unstable();
-    let (lkeys, lower_post_off, lower_post) = group_pairs(&lower);
-    let lower_fst = fst_from_sorted(lkeys.iter().enumerate().map(|(i, k)| (k.as_bytes(), i as u64)));
-    drop(lower);
-
-    // identifier segments -> names containing them
-    let mut segs: Vec<(String, u32)> = ids
-        .par_iter()
-        .flat_map_iter(|i| {
-            let mut v = Vec::new();
-            split_identifier(names.get(StrId(*i)), &mut v);
-            v.sort();
-            v.dedup();
-            v.into_iter().filter(|s| !s.is_empty()).map(move |s| (s, *i))
-        })
-        .collect();
-    segs.par_sort_unstable();
-    let (skeys, seg_post_off, seg_post) = group_pairs(&segs);
-    let segs_fst = fst_from_sorted(skeys.iter().enumerate().map(|(i, k)| (k.as_bytes(), i as u64)));
-    drop(segs);
-
-    // trigrams of lower-cased names
-    let mut tris: Vec<(u32, u32)> = ids
-        .par_iter()
-        .flat_map_iter(|i| {
-            let l = names.get(StrId(*i)).to_lowercase();
-            let b = l.as_bytes();
-            let mut v: Vec<u32> = b.windows(3).map(|w| (w[0] as u32) << 16 | (w[1] as u32) << 8 | w[2] as u32).collect();
-            v.sort_unstable();
-            v.dedup();
-            v.into_iter().map(move |t| (t, *i))
-        })
-        .collect();
-    tris.par_sort_unstable();
-    let (tri_keys, tri_off, tri_post) = group_pairs(&tris);
+    let ((names_fst, (lower_fst, lower_post_off, lower_post)), ((segs_fst, seg_post_off, seg_post), (tri_keys, tri_off, tri_post))) = rayon::join(
+        || {
+            rayon::join(
+                || fst_from_sorted(ids.iter().map(|i| (names.bytes(StrId(*i)), *i as u64))),
+                || {
+                    let mut lower: Vec<(String, u32)> = ids.par_iter().map(|i| (names.get(StrId(*i)).to_lowercase(), *i)).collect();
+                    lower.par_sort_unstable();
+                    let (lkeys, lower_post_off, lower_post) = group_pairs(&lower);
+                    let lower_fst = fst_from_sorted(lkeys.iter().enumerate().map(|(i, k)| (k.as_bytes(), i as u64)));
+                    (lower_fst, lower_post_off, lower_post)
+                },
+            )
+        },
+        || {
+            rayon::join(
+                || {
+                    let mut segs: Vec<(String, u32)> = ids
+                        .par_iter()
+                        .flat_map_iter(|i| {
+                            let mut v = Vec::new();
+                            split_identifier(names.get(StrId(*i)), &mut v);
+                            v.sort();
+                            v.dedup();
+                            v.into_iter().filter(|s| !s.is_empty()).map(move |s| (s, *i))
+                        })
+                        .collect();
+                    segs.par_sort_unstable();
+                    let (skeys, seg_post_off, seg_post) = group_pairs(&segs);
+                    let segs_fst = fst_from_sorted(skeys.iter().enumerate().map(|(i, k)| (k.as_bytes(), i as u64)));
+                    (segs_fst, seg_post_off, seg_post)
+                },
+                || {
+                    let mut tris: Vec<(u32, u32)> = ids
+                        .par_iter()
+                        .flat_map_iter(|i| {
+                            let l = names.get(StrId(*i)).to_lowercase();
+                            let b = l.as_bytes();
+                            let mut v: Vec<u32> = b.windows(3).map(|w| (w[0] as u32) << 16 | (w[1] as u32) << 8 | w[2] as u32).collect();
+                            v.sort_unstable();
+                            v.dedup();
+                            v.into_iter().map(move |t| (t, *i))
+                        })
+                        .collect();
+                    tris.par_sort_unstable();
+                    group_pairs(&tris)
+                },
+            )
+        },
+    );
 
     NameIndexes { names_fst, lower_fst, lower_post_off, lower_post, segs_fst, seg_post_off, seg_post, tri_keys, tri_off, tri_post }
 }
@@ -153,16 +164,20 @@ pub struct TokenInputs<'a> {
     pub file_slot: Option<&'a FxHashMap<u32, usize>>,
 }
 
-pub fn build_token_index(inp: &TokenInputs<'_>) -> TokenIndex {
+fn tokenize_chunk(inp: &TokenInputs<'_>, start: usize, end: usize) -> (Dict, Vec<Entry>, Vec<u16>) {
+    let len_chunk = end - start;
     let mut dict = Dict { map: FxHashMap::default(), toks: Vec::new() };
     let mut name_cache: FxHashMap<u32, Box<[u32]>> = FxHashMap::default();
     let mut qname_cache: FxHashMap<u32, Box<[u32]>> = FxHashMap::default();
-    let mut entries: Vec<Entry> = Vec::with_capacity(inp.hot.len() * 12);
-    let mut norm = vec![0u16; inp.hot.len()];
+    let mut entries: Vec<Entry> = Vec::with_capacity(len_chunk * 10);
+    let mut norm = vec![0u16; len_chunk];
     let mut scratch: Vec<String> = Vec::new();
     let mut per_node: Vec<(u32, u8)> = Vec::new();
 
-    for (n, (h, c)) in inp.hot.iter().zip(inp.cold.iter()).enumerate() {
+    for (offset, norm_slot) in norm.iter_mut().enumerate() {
+        let n = start + offset;
+        let h = &inp.hot[n];
+        let c = &inp.cold[n];
         let kind = NodeKind::from_u8(h.kind);
         if matches!(kind, Some(NodeKind::Import | NodeKind::Export | NodeKind::Parameter) | None) {
             continue;
@@ -233,7 +248,7 @@ pub fn build_token_index(inp: &TokenInputs<'_>) -> TokenIndex {
                 len += 1;
             }
         }
-        norm[n] = len.min(u16::MAX as usize) as u16;
+        *norm_slot = len.min(u16::MAX as usize) as u16;
         per_node.sort_unstable();
         let mut i = 0;
         while i < per_node.len() {
@@ -247,6 +262,35 @@ pub fn build_token_index(inp: &TokenInputs<'_>) -> TokenIndex {
             entries.push(Entry { tok, node: n as u32 + inp.node_base, mask, tf: tf.min(255) as u8 });
         }
     }
+    (dict, entries, norm)
+}
+
+type MappedChunks = Vec<(Vec<u32>, Vec<Entry>)>;
+
+pub fn build_token_index(inp: &TokenInputs<'_>) -> TokenIndex {
+    let n_nodes = inp.hot.len();
+    let (dict, chunks, norm): (Dict, MappedChunks, Vec<u16>) = if n_nodes < 2048 || rayon::current_num_threads() <= 1 {
+        let (d, entries, norm) = tokenize_chunk(inp, 0, n_nodes);
+        let id_map: Vec<u32> = (0..d.toks.len() as u32).collect();
+        (d, vec![(id_map, entries)], norm)
+    } else {
+        let n_chunks = (rayon::current_num_threads() * 4).max(4).min(n_nodes.div_ceil(1024));
+        let chunk_size = n_nodes.div_ceil(n_chunks);
+        let ranges: Vec<(usize, usize)> = (0..n_chunks).map(|i| (i * chunk_size, ((i + 1) * chunk_size).min(n_nodes))).filter(|(a, b)| a < b).collect();
+        let parts: Vec<(Dict, Vec<Entry>, Vec<u16>)> = ranges.into_par_iter().map(|(a, b)| tokenize_chunk(inp, a, b)).collect();
+        let mut global = Dict { map: FxHashMap::default(), toks: Vec::new() };
+        let mut norm = Vec::with_capacity(n_nodes);
+        let mut mapped = Vec::with_capacity(parts.len());
+        for (d, entries, cn) in parts {
+            norm.extend_from_slice(&cn);
+            let mut id_map = Vec::with_capacity(d.toks.len());
+            for tok in &d.toks {
+                id_map.push(global.id(tok));
+            }
+            mapped.push((id_map, entries));
+        }
+        (global, mapped, norm)
+    };
 
     // rank tokens lexicographically; the FST value is the rank = posting list index
     let mut order: Vec<u32> = (0..dict.toks.len() as u32).collect();
@@ -255,22 +299,33 @@ pub fn build_token_index(inp: &TokenInputs<'_>) -> TokenIndex {
     for (r, t) in order.iter().enumerate() {
         rank[*t as usize] = r as u32;
     }
-    let fst = fst_from_sorted(order.iter().enumerate().map(|(r, t)| (dict.toks[*t as usize].as_bytes(), r as u64)));
-    let mut post_off = vec![0u32; order.len() + 1];
-    for e in &entries {
-        post_off[rank[e.tok as usize] as usize + 1] += 1;
-    }
-    for i in 0..order.len() {
-        post_off[i + 1] += post_off[i];
-    }
-    let mut fill = post_off.clone();
-    let mut post = vec![PostEntry { node: 0, mask: 0, tf: 0, _p: 0 }; entries.len()];
-    // entries were produced in ascending node order, so each list ends up sorted by node
-    for e in &entries {
-        let r = rank[e.tok as usize] as usize;
-        post[fill[r] as usize] = PostEntry { node: e.node, mask: e.mask, tf: e.tf, _p: 0 };
-        fill[r] += 1;
-    }
+    let total_entries: usize = chunks.iter().map(|(_, e)| e.len()).sum();
+    let (fst, (post_off, post)) = rayon::join(
+        || fst_from_sorted(order.iter().enumerate().map(|(r, t)| (dict.toks[*t as usize].as_bytes(), r as u64))),
+        || {
+            let mut post_off = vec![0u32; order.len() + 1];
+            for (id_map, entries) in &chunks {
+                for e in entries {
+                    let r = rank[id_map[e.tok as usize] as usize] as usize;
+                    post_off[r + 1] += 1;
+                }
+            }
+            for i in 0..order.len() {
+                post_off[i + 1] += post_off[i];
+            }
+            let mut fill = post_off.clone();
+            let mut post = vec![PostEntry { node: 0, mask: 0, tf: 0, _p: 0 }; total_entries];
+            // chunks and entries are in ascending node order, so each posting list stays sorted by node
+            for (id_map, entries) in &chunks {
+                for e in entries {
+                    let r = rank[id_map[e.tok as usize] as usize] as usize;
+                    post[fill[r] as usize] = PostEntry { node: e.node, mask: e.mask, tf: e.tf, _p: 0 };
+                    fill[r] += 1;
+                }
+            }
+            (post_off, post)
+        },
+    );
     let df: Vec<u32> = post_off.windows(2).map(|w| w[1] - w[0]).collect();
     let mut encoded = Vec::with_capacity(post.len() * 3);
     let mut offsets = Vec::with_capacity(post_off.len());

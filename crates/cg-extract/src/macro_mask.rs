@@ -119,28 +119,75 @@ pub fn error_nodes(tree: &Tree) -> usize {
     count
 }
 
+/// Fast linear scan: does `src` contain a `cfg_<ident>! {` candidate (excluding `cfg_if!`)?
+/// Avoids parsing files that only mention `cfg_attr`, `cfg_if!`, or identifiers containing `cfg_`.
+fn has_cfg_wrapper_candidate(src: &str) -> bool {
+    let bytes = src.as_bytes();
+    let mut pos = 0;
+    while let Some(off) = memchr::memmem::find(&bytes[pos..], b"cfg_") {
+        let start = pos + off;
+        let prev_ident = start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+        let mut i = start + 4;
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+            i += 1;
+        }
+        if !prev_ident && &bytes[start..i] != b"cfg_if" {
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'!' {
+                j += 1;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'{' {
+                    return true;
+                }
+            }
+        }
+        pos = i;
+    }
+    false
+}
+
+thread_local! {
+    static RUST_PARSER: std::cell::RefCell<Option<Parser>> = const { std::cell::RefCell::new(None) };
+}
+
 /// The masked view of a Rust source (see the module docs).
 pub fn rust_item_wrappers(src: &str, timeout: Duration) -> Mask {
-    if src.len() > MAX_BYTES || !src.contains("cfg_") {
+    if src.len() > MAX_BYTES || !has_cfg_wrapper_candidate(src) {
         return Mask::None;
     }
     if timeout.is_zero() {
         return Mask::Expired;
     }
-    let Some(language) = cg_kernel::hooks::language("rust") else { return Mask::None };
-    let mut parser = Parser::new();
-    if parser.set_language(&language).is_err() {
-        return Mask::None;
-    }
+    let bytes = src.as_bytes();
     let deadline = Instant::now() + timeout;
     let mut expired = false;
+    let mut steps = 0u32;
     let mut cancel = |_: &tree_sitter::ParseState| {
-        expired = Instant::now() >= deadline;
-        expired
+        steps = steps.wrapping_add(1);
+        if steps & 4095 == 0 {
+            expired = Instant::now() >= deadline;
+            expired
+        } else {
+            false
+        }
     };
-    let bytes = src.as_bytes();
-    let tree =
-        parser.parse_with_options(&mut |offset, _| bytes.get(offset..).unwrap_or_default(), None, Some(ParseOptions::new().progress_callback(&mut cancel)));
+    let tree = RUST_PARSER.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            let language = cg_kernel::hooks::language("rust")?;
+            let mut p = Parser::new();
+            p.set_language(&language).ok()?;
+            *slot = Some(p);
+        }
+        let parser = slot.as_mut().unwrap();
+        parser.reset();
+        parser.parse_with_options(&mut |offset, _| bytes.get(offset..).unwrap_or_default(), None, Some(ParseOptions::new().progress_callback(&mut cancel)))
+    });
     if expired {
         return Mask::Expired;
     }

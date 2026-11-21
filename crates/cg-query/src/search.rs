@@ -159,25 +159,31 @@ fn push_plain(word: &str, out: &mut Vec<QueryToken>, seen: &mut FxHashSet<(Strin
 #[derive(Clone, Copy, Default)]
 struct Cand {
     score: f32,
+    mask: u64,
 }
 
-/// Per-search accumulator: best score per node and the set of tokens that reached it.
+/// Per-search accumulator: best score per node and bitmask of tokens that reached it.
 struct Acc {
     best: FxHashMap<NodeIdx, Cand>,
-    /// token index -> nodes it reached (used to count distinct terms per node)
-    reached: FxHashMap<NodeIdx, u64>,
+    /// Bitmask of token slots that already achieved a strong exact/case-insensitive hit (>= 85).
+    exact_slots: u64,
 }
 
 impl Acc {
     fn new() -> Acc {
-        Acc { best: FxHashMap::default(), reached: FxHashMap::default() }
+        Acc { best: FxHashMap::default(), exact_slots: 0 }
     }
+    #[inline]
     fn add(&mut self, tok: usize, n: NodeIdx, score: f32) {
+        let bit = 1u64 << tok.min(63);
         let c = self.best.entry(n).or_default();
         if score > c.score {
             c.score = score;
         }
-        *self.reached.entry(n).or_default() |= 1u64 << (tok.min(63));
+        c.mask |= bit;
+        if score >= 85.0 {
+            self.exact_slots |= bit;
+        }
     }
 }
 
@@ -186,8 +192,17 @@ fn norm_qname(s: &str) -> String {
 }
 
 impl Graph {
-    fn layers(&self) -> Vec<(&Seg, bool)> {
-        let mut v: Vec<(&Seg, bool)> = vec![(&*self.view.base, false)];
+    #[inline]
+    fn for_each_layer(&self, mut f: impl FnMut(&Seg, bool)) {
+        f(&self.view.base, false);
+        if let Some(d) = &self.view.delta {
+            f(&d.seg, true);
+        }
+    }
+
+    fn layers(&self) -> smallvec::SmallVec<[(&Seg, bool); 2]> {
+        let mut v = smallvec::SmallVec::new();
+        v.push((&*self.view.base, false));
         if let Some(d) = &self.view.delta {
             v.push((&*d.seg, true));
         }
@@ -212,19 +227,19 @@ impl Graph {
     }
 
     /// Names (per layer StrIds) whose lower-cased form equals `lower`.
-    fn lower_names(&self, seg: &Seg, lower: &str) -> Vec<StrId> {
-        let (Some(fst), off, post) = (&seg.lower_fst, &seg.p.lower_post_off, &seg.p.lower_post) else { return Vec::new() };
+    fn lower_names_slice<'a>(&self, seg: &'a Seg, lower: &str) -> &'a [u32] {
+        let (Some(fst), off, post) = (&seg.lower_fst, &seg.p.lower_post_off, &seg.p.lower_post) else { return &[] };
         match fst.get(lower) {
-            Some(i) if (i as usize) + 1 < off.len() => post[off[i as usize] as usize..off[i as usize + 1] as usize].iter().map(|s| StrId(*s)).collect(),
-            _ => Vec::new(),
+            Some(i) if (i as usize) + 1 < off.len() => &post[off[i as usize] as usize..off[i as usize + 1] as usize],
+            _ => &[],
         }
     }
 
-    fn segment_names(&self, seg: &Seg, segment: &str) -> Vec<StrId> {
-        let (Some(fst), off, post) = (&seg.segs_fst, &seg.p.seg_post_off, &seg.p.seg_post) else { return Vec::new() };
+    fn segment_names_slice<'a>(&self, seg: &'a Seg, segment: &str) -> &'a [u32] {
+        let (Some(fst), off, post) = (&seg.segs_fst, &seg.p.seg_post_off, &seg.p.seg_post) else { return &[] };
         match fst.get(segment) {
-            Some(i) if (i as usize) + 1 < off.len() => post[off[i as usize] as usize..off[i as usize + 1] as usize].iter().map(|s| StrId(*s)).collect(),
-            _ => Vec::new(),
+            Some(i) if (i as usize) + 1 < off.len() => &post[off[i as usize] as usize..off[i as usize + 1] as usize],
+            _ => &[],
         }
     }
 
@@ -277,15 +292,16 @@ impl Graph {
         exact.extend(loose);
         // Case-insensitive fallback for a simple name.
         if exact.is_empty() && !multi {
-            for (seg, d) in self.layers() {
-                for id in self.lower_names(seg, &sym.to_lowercase()) {
-                    self.nodes_of_name_in(seg, d, id, |n| {
+            let lower = sym.to_lowercase();
+            self.for_each_layer(|seg, d| {
+                for &id in self.lower_names_slice(seg, &lower) {
+                    self.nodes_of_name_in(seg, d, StrId(id), |n| {
                         if self.is_definition(n) {
                             exact.push(n);
                         }
                     });
                 }
-            }
+            });
         }
         exact.sort_by_key(|n| (self.node_path(*n).to_owned(), self.line(*n)));
         exact.dedup();
@@ -337,6 +353,101 @@ impl Graph {
         self.search_tokens(&toks, opts)
     }
 
+    fn rank_acc(&self, acc: &Acc, n_tok: usize, opts: &SearchOptions) -> Vec<Hit> {
+        let mut hits: Vec<Hit> = Vec::with_capacity(acc.best.len().min(256));
+        for (&n, &c) in acc.best.iter() {
+            let kind = self.kind(n);
+            if kind == NodeKind::File {
+                if !opts.include_files {
+                    continue;
+                }
+            } else if !kind.is_definition() {
+                continue;
+            }
+            if !opts.kinds.is_empty() && !opts.kinds.contains(&kind) {
+                continue;
+            }
+            let reached = c.mask.count_ones() as u8;
+            let mut score = c.score;
+            if reached > 1 && n_tok > 1 {
+                score *= 1.0 + 0.15 * (reached as f32 - 1.0).min(4.0);
+            }
+            score *= self.file_weight(self.view.hot(n).file);
+            score *= kind_weight(kind);
+            hits.push(Hit { node: n, score, terms: reached });
+        }
+        let cmp = |a: &Hit, b: &Hit| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| self.name(a.node).len().cmp(&self.name(b.node).len()))
+                .then_with(|| self.node_path(a.node).cmp(self.node_path(b.node)))
+                .then_with(|| self.line(a.node).cmp(&self.line(b.node)))
+        };
+        if hits.len() > opts.limit && opts.limit > 0 {
+            hits.select_nth_unstable_by(opts.limit, cmp);
+            hits.truncate(opts.limit);
+        }
+        hits.sort_by(cmp);
+        hits.truncate(opts.limit);
+        hits
+    }
+
+    /// Single-pass retrieval for `explore`: collects each query token ONCE, then scores both the
+    /// combined multi-token query (weight 0.9) and each individual word (weight 0.8) without
+    /// repeating FST, segment, BM25 or fuzzy scans.
+    pub(crate) fn search_for_explore(&self, toks: &[QueryToken], combined_limit: usize, per_word_limit: usize) -> FxHashMap<NodeIdx, f32> {
+        if toks.is_empty() {
+            return FxHashMap::default();
+        }
+        let mut order: Vec<usize> = (0..toks.len()).collect();
+        if toks.len() > 64 {
+            order.sort_by_key(|i| self.token_df(&toks[*i]));
+            order.truncate(64);
+            order.sort();
+        }
+        let mut combined = Acc::new();
+        let mut per_tok: Vec<Acc> = Vec::with_capacity(order.len());
+        let opts_word = SearchOptions { limit: per_word_limit, ..Default::default() };
+        let opts_all = SearchOptions { limit: combined_limit, ..Default::default() };
+        for (slot, &ti) in order.iter().enumerate() {
+            let mut single = Acc::new();
+            self.collect(&toks[ti], 0, &mut single);
+            // Run fuzzy only when this token has no exact/case-insensitive hit and few strong hits.
+            if single.exact_slots == 0 && single.best.values().filter(|c| c.score >= 60.0).count() < per_word_limit.max(5) {
+                self.collect_fuzzy(&toks[ti], 0, &mut single);
+            }
+            let bit = 1u64 << slot.min(63);
+            if single.exact_slots != 0 {
+                combined.exact_slots |= bit;
+            }
+            for (&n, &c) in &single.best {
+                let e = combined.best.entry(n).or_default();
+                if c.score > e.score {
+                    e.score = c.score;
+                }
+                e.mask |= bit;
+            }
+            per_tok.push(single);
+        }
+        let mut seeds: FxHashMap<NodeIdx, f32> = FxHashMap::default();
+        let mut add_hits = |hits: Vec<Hit>, w: f32| {
+            let max = hits.first().map_or(1.0, |h| h.score).max(1.0);
+            for h in hits {
+                let s = (h.score / max).min(1.0) * w;
+                let e = seeds.entry(h.node).or_insert(0.0);
+                if s > *e {
+                    *e = s;
+                }
+            }
+        };
+        add_hits(self.rank_acc(&combined, order.len(), &opts_all), 0.9);
+        for single in &per_tok {
+            add_hits(self.rank_acc(single, 1, &opts_word), 0.8);
+        }
+        seeds
+    }
+
     pub fn search_tokens(&self, toks: &[QueryToken], opts: &SearchOptions) -> Vec<Hit> {
         if toks.is_empty() {
             return Vec::new();
@@ -356,43 +467,15 @@ impl Graph {
             let strong = acc.best.values().filter(|c| c.score >= 60.0).count();
             if strong < opts.limit.max(5) {
                 for (slot, &ti) in order.iter().enumerate() {
+                    // Skip expensive fuzzy/Levenshtein scans for tokens that already matched exactly.
+                    if acc.exact_slots & (1u64 << slot.min(63)) != 0 {
+                        continue;
+                    }
                     self.collect_fuzzy(&toks[ti], slot, &mut acc);
                 }
             }
         }
-        let n_tok = order.len();
-        let mut hits: Vec<Hit> = Vec::with_capacity(acc.best.len());
-        for (n, c) in acc.best.iter() {
-            let kind = self.kind(*n);
-            if kind == NodeKind::File {
-                if !opts.include_files {
-                    continue;
-                }
-            } else if !kind.is_definition() {
-                continue;
-            }
-            if !opts.kinds.is_empty() && !opts.kinds.contains(&kind) {
-                continue;
-            }
-            let reached = acc.reached.get(n).copied().unwrap_or(0).count_ones() as u8;
-            let mut score = c.score;
-            if reached > 1 && n_tok > 1 {
-                score *= 1.0 + 0.15 * (reached as f32 - 1.0).min(4.0);
-            }
-            score *= self.file_weight(self.view.hot(*n).file);
-            score *= kind_weight(kind);
-            hits.push(Hit { node: *n, score, terms: reached });
-        }
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| self.name(a.node).len().cmp(&self.name(b.node).len()))
-                .then_with(|| self.node_path(a.node).cmp(self.node_path(b.node)))
-                .then_with(|| self.line(a.node).cmp(&self.line(b.node)))
-        });
-        hits.truncate(opts.limit);
-        hits
+        self.rank_acc(&acc, order.len(), opts)
     }
 
     /// Document frequency of a token (how many names/nodes it reaches); used to rank rarity.
@@ -473,13 +556,14 @@ impl Graph {
             acc.add(slot, n, 100.0 * scale);
         }
         // 2. case-insensitive
-        for (seg, d) in self.layers() {
-            for id in self.lower_names(seg, &lower) {
-                if self.name_str_in(seg, id) != word {
-                    self.nodes_of_name_in(seg, d, id, |n| acc.add(slot, n, 85.0 * scale));
+        self.for_each_layer(|seg, d| {
+            for &id in self.lower_names_slice(seg, &lower) {
+                let sid = StrId(id);
+                if self.name_str_in(seg, sid) != word {
+                    self.nodes_of_name_in(seg, d, sid, |n| acc.add(slot, n, 85.0 * scale));
                 }
             }
-        }
+        });
         // 3. identifier segments: every segment of the word must occur in the name
         let mut segs: Vec<String> = Vec::new();
         split_identifier(word, &mut segs);
@@ -487,30 +571,40 @@ impl Graph {
         if segs.is_empty() {
             segs.push(lower.clone());
         }
-        for (seg, d) in self.layers() {
-            let mut best: Option<Vec<StrId>> = None;
+        let mut ns: Vec<String> = Vec::new();
+        self.for_each_layer(|seg, d| {
+            let mut best: Option<&[u32]> = None;
             for s in &segs {
-                let names = self.segment_names(seg, s);
+                let names = self.segment_names_slice(seg, s);
                 best = Some(match best {
                     None => names,
                     Some(prev) if prev.len() <= names.len() => prev,
                     Some(_) => names,
                 });
             }
-            let mut cands = best.unwrap_or_default();
-            cands.sort_by_key(|id| self.name_str_in(seg, *id).len());
-            for id in cands.into_iter().take(400) {
-                let name = self.name_str_in(seg, id);
-                let mut ns: Vec<String> = Vec::new();
+            let Some(raw_cands) = best else { return };
+            if raw_cands.is_empty() {
+                return;
+            }
+            let mut cands: Vec<u32> = raw_cands.to_vec();
+            if cands.len() > 400 {
+                cands.select_nth_unstable_by_key(400, |&id| self.name_str_in(seg, StrId(id)).len());
+                cands.truncate(400);
+            }
+            cands.sort_unstable_by_key(|&id| self.name_str_in(seg, StrId(id)).len());
+            for id in cands {
+                let sid = StrId(id);
+                let name = self.name_str_in(seg, sid);
+                ns.clear();
                 split_identifier(name, &mut ns);
                 if !segs.iter().all(|s| ns.contains(s)) {
                     continue;
                 }
                 let extra = ns.len().saturating_sub(segs.len());
                 let base = if extra == 0 { 75.0 } else { (48.0 - 3.0 * extra as f32).max(30.0) };
-                self.nodes_of_name_in(seg, d, id, |n| acc.add(slot, n, base * scale));
+                self.nodes_of_name_in(seg, d, sid, |n| acc.add(slot, n, base * scale));
             }
-        }
+        });
         // 4. definition prefix: class-like names starting with the (capitalised / stemmed) word
         if word.chars().next().is_some_and(|c| c.is_alphabetic()) && lower.len() >= 3 {
             for variant in prefix_variants(&lower) {
@@ -618,8 +712,9 @@ impl Graph {
             return;
         }
         let lower = word.to_lowercase();
-        if lower.chars().count() >= 5 {
-            let dist = if lower.chars().count() >= 8 { 2 } else { 1 };
+        let char_len = lower.chars().count();
+        if (5..=24).contains(&char_len) {
+            let dist = if (8..=16).contains(&char_len) { 2 } else { 1 };
             if let Ok(lev) = Levenshtein::new(&lower, dist) {
                 for (seg, d) in self.layers() {
                     let Some(fst) = &seg.lower_fst else { continue };
