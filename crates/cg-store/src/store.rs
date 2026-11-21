@@ -75,15 +75,15 @@ fn sync_file(f: &File, mode: FsyncMode, light: bool) -> std::io::Result<()> {
     }
 }
 
-fn sync_dir(dir: &Path, mode: FsyncMode) {
+fn sync_dir(dir: &Path, mode: FsyncMode, light: bool) {
     if mode == FsyncMode::Off {
         return;
     }
     #[cfg(unix)]
     if let Ok(d) = File::open(dir) {
-        let _ = d.sync_all();
+        let _ = sync_file(&d, mode, light);
     }
-    let _ = dir;
+    let _ = (dir, light);
 }
 
 pub struct Store {
@@ -170,7 +170,7 @@ impl Store {
         self.read_manifest().ok().flatten().map_or(0, |m| m.generation)
     }
 
-    fn write_manifest(&self, m: &Manifest) -> Result<()> {
+    fn write_manifest(&self, m: &Manifest, light: bool) -> Result<()> {
         // manifest -> manifest.prev (tmp + rename), then the new one the same way.
         if let Ok(cur) = std::fs::read(self.manifest_path()) {
             let tmp = self.dir.join("manifest.prev.tmp");
@@ -181,10 +181,10 @@ impl Store {
         {
             let mut f = File::create(&tmp)?;
             f.write_all(&serde_json::to_vec_pretty(m).expect("manifest json"))?;
-            sync_file(&f, self.fsync, true)?;
+            sync_file(&f, self.fsync, light)?;
         }
         std::fs::rename(&tmp, self.manifest_path())?; // the commit point
-        sync_dir(&self.dir, self.fsync);
+        sync_dir(&self.dir, self.fsync, light);
         Ok(())
     }
 
@@ -286,7 +286,7 @@ impl Store {
             n_edges: seg.meta.n_edges,
             syncs_since_merge: 0,
         };
-        self.write_manifest(&m)?;
+        self.write_manifest(&m, false)?;
         self.gc();
         Ok(m)
     }
@@ -308,7 +308,7 @@ impl Store {
             syncs_since_merge: prev.syncs_since_merge + 1,
             ..prev
         };
-        self.write_manifest(&m)?;
+        self.write_manifest(&m, true)?;
         self.gc();
         Ok(m)
     }
@@ -330,7 +330,7 @@ impl Store {
             syncs_since_merge: 0,
             ..prev
         };
-        self.write_manifest(&m)?;
+        self.write_manifest(&m, true)?;
         self.gc();
         Ok(m)
     }

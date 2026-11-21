@@ -96,7 +96,12 @@ fn resolve_into(e: &Engine<'_>, files: &[FileId], round: Round, outcomes: &mut [
         remaining = rest;
         cursor = range.end as usize;
     }
-    jobs.into_par_iter().for_each_init(WorkerCx::new, |wcx, (file, slots)| {
+    // Balance work across Rayon's binary-tree splits: sort descending by reference count, then
+    // place rank `r` by `r.reverse_bits()` so heavy files distribute evenly across every half.
+    jobs.sort_unstable_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0 .0.cmp(&b.0 .0)));
+    let mut ranked: Vec<(usize, (FileId, &mut [Outcome]))> = jobs.into_iter().enumerate().collect();
+    ranked.sort_unstable_by_key(|(r, _)| r.reverse_bits());
+    ranked.into_par_iter().with_max_len(4).for_each_init(WorkerCx::new, |wcx, (_, (file, slots))| {
         let refs = e.view.refs_of_file(file);
         if !refs.iter().any(|r| in_round(r.kind, round)) {
             return;
