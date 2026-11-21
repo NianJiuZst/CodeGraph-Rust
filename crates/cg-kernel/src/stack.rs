@@ -198,13 +198,14 @@ mod tests {
             .expect("walker thread panicked")
     }
 
-    #[allow(dead_code)]
     fn nested_parens(prefix: &str, suffix: &str) -> String {
         format!("{prefix}{}1{}{suffix}", "(".repeat(DEPTH), ")".repeat(DEPTH))
     }
 
     #[test]
     fn os_bounds_are_sane_on_this_platform() {
+        // Every shipped target has an OS implementation; the fallback budget
+        // is only for platforms the kernel is not built for.
         let low = os_stack_low().expect("OS stack bounds available");
         let sp = current_sp();
         assert!(low < sp, "stack low {low:#x} must be below the current sp {sp:#x}");
@@ -216,6 +217,9 @@ mod tests {
         on_small_stack(|| {
             let low = os_stack_low().expect("OS stack bounds available");
             let used = current_sp() - low;
+            // std/the OS round the requested size up a little (macOS reports
+            // 1,060,864 for a 1 MiB request); the point is that the bounds
+            // describe THIS thread's small stack, not the main thread's.
             assert!(
                 used <= SMALL_STACK + 128 * 1024,
                 "used {used} is not within the {SMALL_STACK}-byte stack"
@@ -223,11 +227,22 @@ mod tests {
         });
     }
 
-    #[cfg(all(feature = "lang-rust", feature = "lang-ts", feature = "lang-python"))]
+    #[cfg(feature = "lang-c")]
     #[test]
-    fn deep_parens_rust_ts_python_defer_instead_of_crashing() {
-        type Extract = fn(&str) -> Result<crate::buffers::EmitOut, String>;
-        let cases: [(&str, Extract, String); 3] = [
+    fn deep_braces_c_defer_instead_of_crashing() {
+        let src = format!("void foo(void) {{\n{}{}\n}}\n", "{".repeat(DEPTH), "}".repeat(DEPTH));
+        let r = on_small_stack(move || run_guarded(|| crate::ccpp::extract("deep.c", &src, "c")));
+        let err = r.err().expect("deep nesting must defer");
+        assert!(err.starts_with("defer:"), "unexpected error: {err}");
+    }
+
+    type Extract = fn(&str) -> Result<crate::buffers::EmitOut, String>;
+
+    #[cfg(all(feature = "lang-c", feature = "lang-rust", feature = "lang-ts", feature = "lang-python"))]
+    #[test]
+    fn deep_parens_cpp_rust_ts_python_defer_instead_of_crashing() {
+        let cases: [(&str, Extract, String); 4] = [
+            ("deep.cpp", |s| crate::ccpp::extract("deep.cpp", s, "cpp"), nested_parens("int f() { return ", "; }\n")),
             ("deep.rs", |s| crate::rustlang::extract("deep.rs", s), nested_parens("fn f() -> i32 { ", " }\n")),
             ("deep.ts", |s| crate::tsjs::extract("deep.ts", s, "typescript"), nested_parens("function f() { return ", "; }\n")),
             ("deep.py", |s| crate::python::extract("deep.py", s), nested_parens("def f():\n    return ", "\n")),
@@ -239,22 +254,22 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "lang-rust")]
+    #[cfg(feature = "lang-c")]
     #[test]
     fn normal_files_are_untouched_by_the_guard() {
-        let src = "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() { add(1, 2); }\n";
-        let r = on_small_stack(move || run_guarded(|| crate::rustlang::extract("ok.rs", src)));
+        let src = "int add(int a, int b) { return a + b; }\nint main(void) { return add(1, 2); }\n";
+        let r = on_small_stack(move || run_guarded(|| crate::ccpp::extract("ok.c", src, "c")));
         assert!(r.is_ok(), "a shallow file must not defer: {:?}", r.err());
         assert!(!overflowed());
     }
 
-    #[cfg(feature = "lang-rust")]
     #[test]
     fn latch_resets_between_runs() {
-        let deep = nested_parens("fn f() -> i32 { ", " }\n");
+        let deep = format!("void foo(void) {{\n{}{}\n}}\n", "{".repeat(DEPTH), "}".repeat(DEPTH));
         on_small_stack(move || {
-            assert!(run_guarded(|| crate::rustlang::extract("deep.rs", &deep)).is_err());
-            let ok = run_guarded(|| crate::rustlang::extract("ok.rs", "fn x() {}\n"));
+            assert!(run_guarded(|| crate::ccpp::extract("deep.c", &deep, "c")).is_err());
+            // The latch from the deep file must not poison the next, shallow one.
+            let ok = run_guarded(|| crate::ccpp::extract("ok.c", "int x;\n", "c"));
             assert!(ok.is_ok(), "latch leaked into the next run: {:?}", ok.err());
         });
     }

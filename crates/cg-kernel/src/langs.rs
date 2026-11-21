@@ -1,17 +1,16 @@
 //! Grammar registry: codegraph `Language` string -> native tree-sitter grammar.
 //!
-//! P1: reduced to the MVP languages (each behind a cargo feature); P5 adds C/C++,
-//! C#, PHP, Ruby and Swift behind their own features. `tsx` and
-//! `jsx` reuse another language's grammar exactly as upstream does.
+//! P1: each language sits behind a cargo feature; lua, scala, dart and r are
+//! not vendored. `tsx` and `jsx` reuse another language's grammar as upstream does.
 
 use tree_sitter::Language;
 
-// Vendored kotlin grammar (build.rs-compiled C, no usable crate exists).
+// Vendored kotlin grammar (build.rs-compiled C, fwcd main@d6af96d).
 #[cfg(feature = "lang-kotlin")]
 extern "C" {
     fn tree_sitter_kotlin() -> *const ();
 }
-// P5: vendored swift grammar (build.rs-compiled C, crate 0.7.3 src/ + scanner fix).
+// Vendored swift grammar (build.rs-compiled C, crate 0.7.4 src/ + scanner patch).
 #[cfg(feature = "lang-swift")]
 extern "C" {
     fn tree_sitter_swift() -> *const ();

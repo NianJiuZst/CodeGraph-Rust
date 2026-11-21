@@ -265,8 +265,8 @@ fn es5_constructors_type_their_instances_through_prototypes() {
     ]);
     let e = dump::dump_edges(&view);
     has(&e, "src/proto.js::Params -extends-> src/proto.js::Base");
-    has(&e, "src/proto.js::use -calls-> src/proto.js::stop");
-    has(&e, "src/proto.js::use -calls-> src/proto.js::save");
+    has(&e, "src/proto.js::use -calls-> src/proto.js::Base::stop");
+    has(&e, "src/proto.js::use -calls-> src/proto.js::Params::save");
     // `p.render()` reaches Params' render (line 6), never Other's (line 9)
     let lines: Vec<u32> = view
         .files()
@@ -279,7 +279,7 @@ fn es5_constructors_type_their_instances_through_prototypes() {
         .collect();
     assert_eq!(lines, vec![6], "{e:#?}");
     // `this.save()` inside a prototype member is the constructor's own save
-    has(&e, "src/proto.js::render -calls-> src/proto.js::save");
+    has(&e, "src/proto.js::Params::render -calls-> src/proto.js::Params::save");
 }
 
 #[test]

@@ -1,67 +1,128 @@
+diff -ruN a/src/ccpp/mod.rs b/src/ccpp/mod.rs
+--- a/src/ccpp/mod.rs	2026-11-22 03:39:16
++++ b/src/ccpp/mod.rs	2026-11-22 03:39:16
+@@ -414,7 +414,8 @@
+     // Measurement hatch (parity sweeps only — never set in production): skip
+     // the defer so the sweep can QUANTIFY how often UTF-8 vs UTF-16 error
+     // recovery actually diverges on this language's erroring files.
+-    let no_defer = std::env::var("CODEGRAPH_KERNEL_CCPP_ERROR_EXTRACT").as_deref() == Ok("1");
++    let no_defer = crate::allow_error_trees()
++        || std::env::var("CODEGRAPH_KERNEL_CCPP_ERROR_EXTRACT").as_deref() == Ok("1");
+     if tree.root_node().has_error() && !no_defer {
+         return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
+     }
+diff -ruN a/src/csharp.rs b/src/csharp.rs
+--- a/src/csharp.rs	2026-11-22 03:39:16
++++ b/src/csharp.rs	2026-11-22 03:39:16
+@@ -163,7 +163,7 @@
+         .set_language(&grammar)
+         .map_err(|e| format!("set_language(csharp) failed: {e}"))?;
+     let tree = crate::parse_budget::parse(&mut parser, source)?;
+-    if tree.root_node().has_error() {
++    if tree.root_node().has_error() && !crate::allow_error_trees() {
+         return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
+     }
+ 
 diff -ruN a/src/go.rs b/src/go.rs
---- a/src/go.rs	2026-10-31 14:33:20.321641602 -0500
-+++ b/src/go.rs	2026-10-31 14:34:43.276537284 -0500
-@@ -114,7 +114,7 @@
-     let tree = parser
-         .parse(source, None)
-         .ok_or_else(|| "parser returned null tree".to_string())?;
+--- a/src/go.rs	2026-11-22 03:39:16
++++ b/src/go.rs	2026-11-22 03:39:16
+@@ -112,7 +112,7 @@
+         .set_language(&grammar)
+         .map_err(|e| format!("set_language(go) failed: {e}"))?;
+     let tree = crate::parse_budget::parse(&mut parser, source)?;
 -    if tree.root_node().has_error() {
 +    if tree.root_node().has_error() && !crate::allow_error_trees() {
          return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
      }
  
 diff -ruN a/src/java.rs b/src/java.rs
---- a/src/java.rs	2026-10-31 14:33:20.321319595 -0500
-+++ b/src/java.rs	2026-10-31 14:34:43.275376943 -0500
-@@ -153,7 +153,7 @@
-     let tree = parser
-         .parse(source, None)
-         .ok_or_else(|| "parser returned null tree".to_string())?;
+--- a/src/java.rs	2026-11-22 03:39:16
++++ b/src/java.rs	2026-11-22 03:39:16
+@@ -151,7 +151,7 @@
+         .set_language(&grammar)
+         .map_err(|e| format!("set_language(java) failed: {e}"))?;
+     let tree = crate::parse_budget::parse(&mut parser, source)?;
 -    if tree.root_node().has_error() {
 +    if tree.root_node().has_error() && !crate::allow_error_trees() {
          return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
      }
  
 diff -ruN a/src/kotlin.rs b/src/kotlin.rs
---- a/src/kotlin.rs	2026-10-31 14:33:20.322260460 -0500
-+++ b/src/kotlin.rs	2026-10-31 14:34:43.278713366 -0500
-@@ -236,7 +236,7 @@
-     let tree = parser
-         .parse(source, None)
-         .ok_or_else(|| "parser returned null tree".to_string())?;
+--- a/src/kotlin.rs	2026-11-22 03:39:16
++++ b/src/kotlin.rs	2026-11-22 03:39:16
+@@ -235,7 +235,7 @@
+         .set_language(&grammar)
+         .map_err(|e| format!("set_language(kotlin) failed: {e}"))?;
+     let tree = crate::parse_budget::parse(&mut parser, source)?;
 -    if tree.root_node().has_error() {
 +    if tree.root_node().has_error() && !crate::allow_error_trees() {
          // Includes the PHANTOM errors (complete CSTs with hasError set) and
          // every fun-interface misparse — trust the flag, wasm is canonical.
          return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
+diff -ruN a/src/php.rs b/src/php.rs
+--- a/src/php.rs	2026-11-22 03:39:16
++++ b/src/php.rs	2026-11-22 03:39:16
+@@ -166,7 +166,7 @@
+         .set_language(&grammar)
+         .map_err(|e| format!("set_language(php) failed: {e}"))?;
+     let tree = crate::parse_budget::parse(&mut parser, source)?;
+-    if tree.root_node().has_error() {
++    if tree.root_node().has_error() && !crate::allow_error_trees() {
+         return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
+     }
+ 
 diff -ruN a/src/python.rs b/src/python.rs
---- a/src/python.rs	2026-10-31 14:33:20.321595902 -0500
-+++ b/src/python.rs	2026-10-31 14:34:43.276203695 -0500
-@@ -164,7 +164,7 @@
-     let tree = parser
-         .parse(source, None)
-         .ok_or_else(|| "parser returned null tree".to_string())?;
+--- a/src/python.rs	2026-11-22 03:39:16
++++ b/src/python.rs	2026-11-22 03:39:16
+@@ -162,7 +162,7 @@
+         .set_language(&grammar)
+         .map_err(|e| format!("set_language(python) failed: {e}"))?;
+     let tree = crate::parse_budget::parse(&mut parser, source)?;
+-    if tree.root_node().has_error() {
++    if tree.root_node().has_error() && !crate::allow_error_trees() {
+         return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
+     }
+ 
+diff -ruN a/src/ruby.rs b/src/ruby.rs
+--- a/src/ruby.rs	2026-11-22 03:39:16
++++ b/src/ruby.rs	2026-11-22 03:39:16
+@@ -141,7 +141,7 @@
+         .set_language(&grammar)
+         .map_err(|e| format!("set_language(ruby) failed: {e}"))?;
+     let tree = crate::parse_budget::parse(&mut parser, source)?;
 -    if tree.root_node().has_error() {
 +    if tree.root_node().has_error() && !crate::allow_error_trees() {
          return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
      }
  
 diff -ruN a/src/rustlang.rs b/src/rustlang.rs
---- a/src/rustlang.rs	2026-10-31 14:33:20.321908827 -0500
-+++ b/src/rustlang.rs	2026-10-31 14:34:43.277523545 -0500
-@@ -143,7 +143,7 @@
-     let tree = parser
-         .parse(source, None)
-         .ok_or_else(|| "parser returned null tree".to_string())?;
+--- a/src/rustlang.rs	2026-11-22 03:39:16
++++ b/src/rustlang.rs	2026-11-22 03:39:16
+@@ -141,7 +141,7 @@
+         .set_language(&grammar)
+         .map_err(|e| format!("set_language(rust) failed: {e}"))?;
+     let tree = crate::parse_budget::parse(&mut parser, source)?;
+-    if tree.root_node().has_error() {
++    if tree.root_node().has_error() && !crate::allow_error_trees() {
+         return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
+     }
+ 
+diff -ruN a/src/swift.rs b/src/swift.rs
+--- a/src/swift.rs	2026-11-22 03:39:16
++++ b/src/swift.rs	2026-11-22 03:39:16
+@@ -242,7 +242,7 @@
+         .set_language(&grammar)
+         .map_err(|e| format!("set_language(swift) failed: {e}"))?;
+     let tree = crate::parse_budget::parse(&mut parser, source)?;
 -    if tree.root_node().has_error() {
 +    if tree.root_node().has_error() && !crate::allow_error_trees() {
          return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
      }
  
 diff -ruN a/src/tsjs/mod.rs b/src/tsjs/mod.rs
---- a/src/tsjs/mod.rs	2026-10-31 14:33:20.322607556 -0500
-+++ b/src/tsjs/mod.rs	2026-10-31 14:34:43.279016973 -0500
-@@ -245,7 +245,7 @@
+--- a/src/tsjs/mod.rs	2026-11-22 03:39:16
++++ b/src/tsjs/mod.rs	2026-11-22 03:39:16
+@@ -259,7 +259,7 @@
      // type annotation). Erroring files are rare (0-0.42% across express/
      // excalidraw/vscode) and per-file wasm fallback keeps routing graph-neutral
      // by construction; clean files — 99.6%+ — stay on the fast path.

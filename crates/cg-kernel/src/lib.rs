@@ -4,7 +4,7 @@
 //! the repository root and `UPSTREAM_COMMIT` next to this crate's manifest).
 //!
 //! Patch P1 replaces the napi entry points with the pure-Rust API below and puts
-//! each walker behind a cargo feature. The walkers themselves are untouched.
+//! each walker behind a cargo feature.
 //! Input is `(file path, source text, language)`; output is the five flat tables
 //! described in `buffers.rs` (ABI v2), one call per file.
 

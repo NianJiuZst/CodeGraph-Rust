@@ -301,7 +301,7 @@ mod tests {
     /// A `step_over` kind is passed without ending the run, and the comments
     /// on either side of it join; any other node still ends it. With no
     /// step-over kinds the walk stops at the first non-comment, as before.
-    // P1: needs the dart grammar, which is vendored with the dart walker in M5.
+    // P1: needs the dart grammar, which is not vendored.
     #[cfg(any())]
     #[test]
     fn steps_over_only_the_listed_kinds() {

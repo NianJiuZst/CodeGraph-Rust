@@ -160,6 +160,14 @@ fn is_host_global_root(name: &str) -> bool {
     matches!(name, "window" | "globalThis")
 }
 
+/// SFC_SCRIPT_HOST_FILE (tree-sitter.ts, #3393): a single-file component, whose
+/// script blocks the TS extractor reads under the component's own path. The
+/// kernel is never handed one; the check keeps the two readings the same.
+fn is_sfc_script_host(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".vue") || lower.ends_with(".svelte") || lower.ends_with(".astro")
+}
+
 /// One scope-stack entry (TS keeps node IDs; rows are our equivalent).
 struct Scope {
     row: u32,
@@ -218,6 +226,14 @@ pub struct Walker<'t> {
     object_path_owners: HashMap<u32, String>,
     /// ownsObjectLiterals: false for a generated or minified bundle (#2300).
     owns_objects: bool,
+    /// The functions and classes each scope declares, by (scope row, name):
+    /// what a `Ctor.prototype.m = function () {…}` or `Ctor.m = function () {…}`
+    /// written in that scope hangs its method on (#2966). Mirrors
+    /// TreeSitterExtractor.scopeDeclarations.
+    scope_declarations: HashMap<(u32, String), (u32, &'static str)>,
+    /// The function of a `module.exports = {…}` member being extracted: the
+    /// module exports it (#2966). Mirrors TreeSitterExtractor.exportedMemberFn.
+    exported_member_fn: Option<usize>,
 }
 
 const MAX_VALUE_REF_NODES: usize = 20_000;
@@ -225,20 +241,12 @@ const MAX_VALUE_REF_NODES: usize = 20_000;
 pub fn extract(file_path: &str, source: &str, language: &str) -> Result<EmitOut, String> {
     let variant = Variant::from_language(language)
         .ok_or_else(|| format!("tsjs walker does not handle language: {language}"))?;
-    let grammar = langs::grammar_for(language)
-        .ok_or_else(|| format!("no grammar for language: {language}"))?;
-
     let t0 = std::time::Instant::now();
-    let mut parser = Parser::new();
-    parser
-        .set_language(&grammar)
-        .map_err(|e| format!("set_language({language}) failed: {e}"))?;
     let tree = if matches!(language, "typescript" | "tsx") {
-        crate::hooks::parse_with_rewrite(&mut parser, source, variance::mask)
+        crate::hooks::parse_lang_with_rewrite(language, source, variance::mask)?
     } else {
-        crate::hooks::parse(&mut parser, source)
-    }
-        .ok_or_else(|| "parser returned null tree".to_string())?;
+        crate::hooks::parse_lang(language, source)?
+    };
 
     // Files with parse ERRORS defer to the wasm extractor (the `defer:` prefix
     // tells the TS side this is expected routing, not a malfunction). Reason:
@@ -272,6 +280,8 @@ pub fn extract(file_path: &str, source: &str, language: &str) -> Result<EmitOut,
         vue_store_file: None,
         object_path_owners: HashMap::new(),
         owns_objects: !util::is_generated_file(file_path) && !util::is_minified_content(file_path, source),
+        scope_declarations: HashMap::new(),
+        exported_member_fn: None,
     };
 
     // File node (TreeSitterExtractor.extract): id `file:<path>`, endLine =
@@ -475,6 +485,9 @@ impl<'t> Walker<'t> {
             source_id_str: NONE_STR,
             target_id_str: NONE_STR,
         });
+        if kind == "function" || kind == "class" {
+            self.scope_declarations.insert((parent_row, name.to_string()), (row, kind));
+        }
 
         self.node_ids.push(id);
         if kind == "function" || kind == "method" {
@@ -750,14 +763,10 @@ impl<'t> Walker<'t> {
             // reference to the module), then links each re-exported name.
             self.extract_import(node);
             self.emit_re_export_refs(node);
-        } else if kind == "export_statement" && self.looks_like_vue_store_file() {
-            // Vuex MODULE default export (`export default { actions: {…} }`).
-            if let Some(exported) = node.child_by_field_name("value") {
-                if matches!(exported.kind(), "object" | "object_expression") {
-                    self.extract_store_collection_methods(exported);
-                    skip_children = true;
-                }
-            }
+        } else if kind == "export_statement" && self.extract_default_export_object(node) {
+            // `export default { … }`: a Vuex module, or any other object with
+            // function members (#3393).
+            skip_children = true;
         } else if kind == "call_expression" {
             self.extract_call(node);
         } else if kind == "new_expression" {
@@ -847,6 +856,17 @@ impl<'t> Walker<'t> {
             // its declarator, like at module scope. Mirrors
             // TreeSitterExtractor's declaratorBoundFunction.
             if self.declarator_bound_function(node) {
+                self.extract_function(node, None);
+                return;
+            }
+            // `Ctor.prototype.m = function () {…}` in a body — a module
+            // wrapper, a factory — is a method of the constructor declared
+            // beside it (#2966). Mirrors TreeSitterExtractor's visitFunctionBody.
+            let constructor_member = node
+                .parent()
+                .filter(|p| p.kind() == "assignment_expression")
+                .is_some_and(|assignment| self.constructor_member(assignment, node).is_some());
+            if constructor_member {
                 self.extract_function(node, None);
                 return;
             }

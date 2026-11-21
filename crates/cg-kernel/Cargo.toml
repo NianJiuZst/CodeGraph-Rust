@@ -20,7 +20,6 @@ lang-go = ["dep:tree-sitter-go"]
 lang-java = ["dep:tree-sitter-java"]
 lang-rust = ["dep:tree-sitter-rust"]
 lang-kotlin = ["dep:tree-sitter-language"]
-# P5: second-phase languages. `lang-c` covers C and C++ (one walker, two grammars).
 lang-c = ["dep:tree-sitter-c", "dep:tree-sitter-cpp"]
 lang-csharp = ["dep:tree-sitter-c-sharp"]
 lang-php = ["dep:tree-sitter-php"]

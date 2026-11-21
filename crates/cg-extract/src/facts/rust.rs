@@ -72,22 +72,45 @@ fn conditional_items(cx: &mut Cx, root: Node) -> Option<Tree> {
     for (start, end) in ranges {
         blank(&mut masked[start..end]);
     }
-    let mut parser = Parser::new();
-    parser.set_language(&cg_kernel::hooks::language("rust")?).ok()?;
     // Use the configured parsing budget, not a separate 100 ms cutoff which
     // can silently change imports under normal indexing load.
     if cx.parse_timeout.is_zero() {
         cx.facts.timed_out = true;
         return None;
     }
+    thread_local! {
+        static RUST_PARSER: std::cell::RefCell<Option<Parser>> = const { std::cell::RefCell::new(None) };
+    }
     let deadline = Instant::now() + cx.parse_timeout;
     let mut expired = false;
+    let mut steps: u32 = 0;
     let mut cancel = |_: &tree_sitter::ParseState| {
-        expired = Instant::now() >= deadline;
-        expired
+        steps = steps.wrapping_add(1);
+        if (steps & 4095) == 0 && Instant::now() >= deadline {
+            expired = true;
+            true
+        } else {
+            false
+        }
     };
-    let tree =
-        parser.parse_with_options(&mut |offset, _| masked.get(offset..).unwrap_or_default(), None, Some(ParseOptions::new().progress_callback(&mut cancel)));
+    let tree = RUST_PARSER.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            let mut p = Parser::new();
+            p.set_language(&cg_kernel::hooks::language("rust")?).ok()?;
+            *slot = Some(p);
+        }
+        let parser = slot.as_mut().unwrap();
+        let tree = parser.parse_with_options(
+            &mut |offset, _| masked.get(offset..).unwrap_or_default(),
+            None,
+            Some(ParseOptions::new().progress_callback(&mut cancel)),
+        );
+        if tree.is_none() {
+            parser.reset();
+        }
+        tree
+    });
     cx.facts.timed_out |= expired;
     let tree = tree?;
     // Non-item wrappers (cfg_if!, DSLs, malformed syntax) are left opaque.

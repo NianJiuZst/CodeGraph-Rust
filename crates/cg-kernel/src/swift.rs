@@ -75,7 +75,7 @@ fn is_literal_receiver(kind: &str) -> bool {
             | "float_literal" | "int_literal" | "decimal_integer_literal" | "real_literal"
             | "char_literal" | "character_literal" | "rune_literal" | "regex" | "regex_literal"
             | "true" | "false" | "boolean_literal" | "bool_literal" | "none" | "null" | "nil"
-            | "null_literal" | "undefined"
+            | "nil_literal" | "null_literal" | "undefined"
             | "list" | "list_literal" | "array" | "array_literal" | "array_creation_expression"
             | "dictionary" | "dict_literal" | "object" | "tuple" | "set"
     )
@@ -129,13 +129,14 @@ fn is_type_path(s: &str) -> bool {
 }
 
 /// isSwiftCallWrapper (tree-sitter.ts): a wrapper that leaves a call's target
-/// the same — `try`/`await`, which before a chain bind to the part before its
-/// last call (`try! A().b()` is `(try! A()).b()`), or a prefix operator, which
-/// binds to the leftmost operand (`!isReady()` is `(!isReady)()`). An implicit
-/// member's leading `.` (`.success(x)`) is part of the name.
+/// the same — `try`/`await`/`unsafe`, which before a chain bind to the part
+/// before its last call (`try! A().b()` is `(try! A()).b()`), or a prefix
+/// operator, which binds to the leftmost operand (`!isReady()` is
+/// `(!isReady)()`). An implicit member's leading `.` (`.success(x)`) is part
+/// of the name.
 fn is_call_wrapper(node: Node, src: &str) -> bool {
     match node.kind() {
-        "try_expression" | "await_expression" => true,
+        "try_expression" | "await_expression" | "unsafe_expression" => true,
         "prefix_expression" => !src[node.byte_range()].starts_with('.'),
         _ => false,
     }
@@ -234,14 +235,8 @@ pub struct Walker<'t> {
 }
 
 pub fn extract(file_path: &str, source: &str) -> Result<EmitOut, String> {
-    let grammar = crate::langs::grammar_for("swift").ok_or("no swift grammar")?;
     let t0 = std::time::Instant::now();
-    let mut parser = Parser::new();
-    parser
-        .set_language(&grammar)
-        .map_err(|e| format!("set_language(swift) failed: {e}"))?;
-    let tree = crate::hooks::parse(&mut parser, source)
-        .ok_or_else(|| "parser returned null tree".to_string())?;
+    let tree = crate::hooks::parse_lang("swift", source)?;
     if tree.root_node().has_error() && !crate::allow_error_trees() {
         return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
     }

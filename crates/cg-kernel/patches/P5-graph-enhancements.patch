@@ -1,0 +1,247 @@
+diff -ruN a/src/ccpp/mod.rs b/src/ccpp/mod.rs
+--- a/src/ccpp/mod.rs	2026-11-22 03:39:16
++++ b/src/ccpp/mod.rs	2026-11-22 03:39:16
+@@ -1282,7 +1282,7 @@
+ 
+         let extra = Extra {
+             docstring: preceding_docstring(node, self.src),
+-            signature: self.constructor_signature(node),
++            signature: self.constructor_signature(node).or_else(|| self.cpp_parameters(node)),
+             visibility: if self.variant == Variant::Cpp { self.visibility_of(node) } else { None },
+             return_type: self.return_type_of(node),
+             ..Extra::default()
+@@ -1319,7 +1319,7 @@
+ 
+         let extra = Extra {
+             docstring: preceding_docstring(node, self.src),
+-            signature: self.constructor_signature(node),
++            signature: self.constructor_signature(node).or_else(|| self.cpp_parameters(node)),
+             visibility: if self.variant == Variant::Cpp { self.visibility_of(node) } else { None },
+             is_abstract: if self.variant == Variant::Cpp && self.is_cpp_pure_virtual_method_decl(node) {
+                 Some(true)
+@@ -1861,6 +1861,24 @@
+         }
+         let params = node.child_by_field_name("declarator")?.child_by_field_name("parameters")?;
+         Some(format!("{}{}", self.text(params), if node.kind() == "declaration" { ";" } else { "" }))
++    }
++
++    /// Every other C++ function's parameter list, for overload choice (upstream reads it from
++    /// the source at resolution); ` = delete` marks one no call that compiles reaches.
++    fn cpp_parameters(&self, node: Node<'t>) -> Option<String> {
++        if self.variant != Variant::Cpp || self.recover_cpp_macro_defined_name(node).is_some() {
++            return None;
++        }
++        let mut d = node.child_by_field_name("declarator");
++        while let Some(x) = d {
++            if x.kind() == "function_declarator" {
++                let params = x.child_by_field_name("parameters")?;
++                let deleted = self.text(node).trim_end().trim_end_matches(';').trim_end().ends_with("delete");
++                return Some(format!("{}{}", self.text(params), if deleted { " = delete" } else { "" }));
++            }
++            d = inner_declarator(x);
++        }
++        None
+     }
+ 
+     /// cppStackConstructions (tree-sitter.ts, #1035 / #1839): whether the
+diff -ruN a/src/swift.rs b/src/swift.rs
+--- a/src/swift.rs	2026-11-22 03:39:16
++++ b/src/swift.rs	2026-11-22 03:39:16
+@@ -857,7 +857,7 @@
+         }
+         let extra = Extra {
+             docstring: preceding_docstring(node, self.src),
+-            signature: None, // getSignature reads the never-resolving 'parameter' field
++            signature: self.swift_parameters(node),
+             visibility: Some(self.visibility_of(node)),
+             is_async: Some(self.is_async(node)), // present-false (dead hook)
+             is_static: Some(self.is_static(node)),
+@@ -874,12 +874,33 @@
+         self.stack.pop();
+     }
+ 
++    /// The parameter list as written, `(_ a: Int, label b: String = "")`: Swift overloads by
++    /// argument label, which the resolver reads from here (upstream reads the source again).
++    fn swift_parameters(&self, node: Node<'t>) -> Option<String> {
++        let open = (0..node.child_count()).filter_map(|i| node.child(i)).find(|c| c.kind() == "(")?;
++        let bytes = self.src.as_bytes();
++        let mut depth = 0usize;
++        for i in open.start_byte()..node.end_byte().min(bytes.len()) {
++            match bytes[i] {
++                b'(' => depth += 1,
++                b')' => {
++                    depth = depth.saturating_sub(1);
++                    if depth == 0 {
++                        return self.src.get(open.start_byte()..=i).map(str::to_owned);
++                    }
++                }
++                _ => {}
++            }
++        }
++        None
++    }
++
+     fn extract_method(&mut self, node: Node<'t>) {
+         stack_guard!();
+         let name = self.extract_name(node);
+         let extra = Extra {
+             docstring: preceding_docstring(node, self.src),
+-            signature: None,
++            signature: self.swift_parameters(node),
+             visibility: Some(self.visibility_of(node)),
+             is_async: Some(self.is_async(node)),
+             is_static: Some(self.is_static(node)),
+@@ -899,8 +920,13 @@
+     fn extract_class(&mut self, node: Node<'t>) {
+         stack_guard!();
+         let name = self.extract_name(node);
++        // An extension is a class node too; the signature is what tells it from the declaration
++        let is_extension = (0..node.child_count()).any(|i| node.child(i).is_some_and(|c| c.kind() == "extension"));
++        // as written: `extension Outer.Inner` is named `Inner`, but extends no top-level `Inner`
++        let written = node.child_by_field_name("name").map_or_else(|| name.clone(), |n| self.text(n).to_owned());
+         let extra = Extra {
+             docstring: preceding_docstring(node, self.src),
++            signature: is_extension.then(|| format!("extension {written}")),
+             visibility: Some(self.visibility_of(node)),
+             ..Extra::default()
+         };
+diff -ruN a/src/tsjs/extractors.rs b/src/tsjs/extractors.rs
+--- a/src/tsjs/extractors.rs	2026-11-22 03:39:16
++++ b/src/tsjs/extractors.rs	2026-11-22 03:39:16
+@@ -1808,13 +1808,13 @@
+                     let recv_ident = receiver.filter(|r| {
+                         matches!(r.kind(), "identifier" | "simple_identifier" | "field_identifier")
+                     });
+-                    if let Some(r) = recv_ident {
++                    if let Some(r) = receiver.filter(|r| matches!(r.kind(), "this" | "super")) {
++                        // Preserve the receiver: an unrelated bare function of the
++                        // same name cannot stand in for `this.m()` or `super.m()`.
++                        callee_name = format!("{}.{method_name}", self.text(r));
++                    } else if let Some(r) = recv_ident {
+                         let receiver_name = self.text(r);
+-                        if !matches!(receiver_name, "self" | "this" | "cls" | "super") {
+-                            callee_name = format!("{receiver_name}.{method_name}");
+-                        } else {
+-                            callee_name = method_name.to_string();
+-                        }
++                        callee_name = format!("{receiver_name}.{method_name}");
+                     } else if receiver.is_some_and(|r| self.is_unresolved_member_chain(r)) {
+                         // Retain the call site for effects without guessing a
+                         // project method. Mirrors the TS extraction path.
+@@ -1853,10 +1853,9 @@
+                         };
+                         // `new this.constructor().copy(this)`, a static
+                         // `new this().init()`: an instance of the enclosing
+-                        // class keeps the bare method name, as a call on
+-                        // `this` does.
++                        // class keeps the enclosing receiver.
+                         callee_name = if ctor == "this" || ctor == "this.constructor" {
+-                            method_name.to_string()
++                            format!("this.{method_name}")
+                         } else {
+                             format!("new {ctor}().{method_name}")
+                         };
+diff -ruN a/src/tsjs/mod.rs b/src/tsjs/mod.rs
+--- a/src/tsjs/mod.rs	2026-11-22 03:39:16
++++ b/src/tsjs/mod.rs	2026-11-22 03:39:16
+@@ -11,6 +11,7 @@
+ 
+ mod extractors;
+ mod fnref;
++mod variance;
+ use crate::textutil as util;
+ 
+ use crate::buffers::{
+@@ -241,7 +242,11 @@
+     let variant = Variant::from_language(language)
+         .ok_or_else(|| format!("tsjs walker does not handle language: {language}"))?;
+     let t0 = std::time::Instant::now();
+-    let tree = crate::hooks::parse_lang(language, source)?;
++    let tree = if matches!(language, "typescript" | "tsx") {
++        crate::hooks::parse_lang_with_rewrite(language, source, variance::mask)?
++    } else {
++        crate::hooks::parse_lang(language, source)?
++    };
+ 
+     // Files with parse ERRORS defer to the wasm extractor (the `defer:` prefix
+     // tells the TS side this is expected routing, not a malfunction). Reason:
+diff -ruN a/src/tsjs/variance.rs b/src/tsjs/variance.rs
+--- a/src/tsjs/variance.rs	1970-01-01 08:00:00
++++ b/src/tsjs/variance.rs	2026-11-22 03:39:16
+@@ -0,0 +1,76 @@
++//! A narrow recovery for variance annotations unsupported by the pinned TS grammar.
++//! Only a failed type-parameter list on a type declaration is considered; the parser
++//! retry must be error-free. The equal-length mask leaves all source locations unchanged.
++
++use tree_sitter::{Node, Tree};
++
++fn skip_trivia(bytes: &[u8], mut i: usize, end: usize) -> usize {
++    while i < end {
++        if bytes[i].is_ascii_whitespace() {
++            i += 1;
++        } else if bytes[i..end].starts_with(b"/*") {
++            let Some(close) = bytes[i + 2..end].windows(2).position(|w| w == b"*/") else { return end };
++            i += close + 4;
++        } else if bytes[i..end].starts_with(b"//") {
++            i += 2;
++            while i < end && bytes[i] != b'\n' { i += 1; }
++        } else {
++            break;
++        }
++    }
++    i
++}
++
++fn ident_end(bytes: &[u8], start: usize, end: usize) -> usize {
++    if start >= end || !(bytes[start].is_ascii_alphabetic() || matches!(bytes[start], b'_' | b'$')) {
++        return start;
++    }
++    let mut i = start + 1;
++    while i < end && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b'$')) { i += 1; }
++    i
++}
++
++fn parameter_prefix(bytes: &[u8], start: usize, end: usize, spans: &mut Vec<(usize, usize)>) {
++    let first = skip_trivia(bytes, start, end);
++    let first_end = ident_end(bytes, first, end);
++    if first == first_end || !matches!(&bytes[first..first_end], b"in" | b"out") { return; }
++    let next = skip_trivia(bytes, first_end, end);
++    if next == first_end { return; }
++    let next_end = ident_end(bytes, next, end);
++    if next == next_end || &bytes[next..next_end] == b"extends" { return; }
++    if &bytes[first..first_end] == b"in" && &bytes[next..next_end] == b"out" {
++        let name = skip_trivia(bytes, next_end, end);
++        let name_end = ident_end(bytes, name, end);
++        if name == next_end || name == name_end || &bytes[name..name_end] == b"extends" { return; }
++        spans.push((next, next_end));
++    }
++    spans.push((first, first_end));
++}
++
++fn find_spans(node: Node<'_>, source: &[u8], spans: &mut Vec<(usize, usize)>) {
++    let mut pending = vec![node];
++    while let Some(n) = pending.pop() {
++        if !n.has_error() { continue; }
++        if n.kind() == "type_parameters"
++            && n.parent().is_some_and(|p| matches!(p.kind(), "interface_declaration" | "class_declaration" | "abstract_class_declaration" | "type_alias_declaration"))
++        {
++            let mut cursor = n.walk();
++            for child in n.children(&mut cursor) {
++                if matches!(child.kind(), "<" | ",") {
++                    parameter_prefix(source, child.end_byte(), n.end_byte(), spans);
++                }
++            }
++        }
++        let mut cursor = n.walk();
++        pending.extend(n.named_children(&mut cursor).filter(|c| c.has_error()));
++    }
++}
++
++pub(super) fn mask(tree: &Tree, source: &str) -> Option<String> {
++    let mut spans = Vec::new();
++    find_spans(tree.root_node(), source.as_bytes(), &mut spans);
++    if spans.is_empty() { return None; }
++    let mut bytes = source.as_bytes().to_vec();
++    for (start, end) in spans { bytes[start..end].fill(b' '); }
++    String::from_utf8(bytes).ok()
++}

@@ -155,14 +155,8 @@ pub struct Walker<'t> {
 }
 
 pub fn extract(file_path: &str, source: &str) -> Result<EmitOut, String> {
-    let grammar = crate::langs::grammar_for("python").ok_or("no python grammar")?;
     let t0 = std::time::Instant::now();
-    let mut parser = Parser::new();
-    parser
-        .set_language(&grammar)
-        .map_err(|e| format!("set_language(python) failed: {e}"))?;
-    let tree = crate::hooks::parse(&mut parser, source)
-        .ok_or_else(|| "parser returned null tree".to_string())?;
+    let tree = crate::hooks::parse_lang("python", source)?;
     if tree.root_node().has_error() && !crate::allow_error_trees() {
         return Err("defer: parse tree contains errors — wasm recovery is canonical".to_string());
     }

@@ -404,14 +404,8 @@ pub fn extract(file_path: &str, source: &str, language: &str) -> Result<EmitOut,
         "cpp" => Variant::Cpp,
         other => return Err(format!("ccpp walker got language '{other}'")),
     };
-    let grammar = crate::langs::grammar_for(language).ok_or("no c/cpp grammar")?;
     let t0 = std::time::Instant::now();
-    let mut parser = Parser::new();
-    parser
-        .set_language(&grammar)
-        .map_err(|e| format!("set_language({language}) failed: {e}"))?;
-    let tree = crate::hooks::parse(&mut parser, source)
-        .ok_or_else(|| "parser returned null tree".to_string())?;
+    let tree = crate::hooks::parse_lang(language, source)?;
     // Measurement hatch (parity sweeps only — never set in production): skip
     // the defer so the sweep can QUANTIFY how often UTF-8 vs UTF-16 error
     // recovery actually diverges on this language's erroring files.

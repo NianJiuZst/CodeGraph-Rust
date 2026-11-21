@@ -66,7 +66,7 @@ fn gap_rule_edits_remain_equal_to_full_rebuild() {
     assert!(has("disc/disc.go::Discovery::Run -calls-> ec2/ec2.go::EC2::refresh"), "{:#?}", edges(root));
     assert!(has("ec2/ec2.go::EC2 -implements-> disc/disc.go::ReadCloser"));
     assert!(has("src/use.ts::caller -calls-> src/impl.ts::realImpl"));
-    assert!(has("src/proto.js::use -calls-> src/proto.js::render"));
+    assert!(has("src/proto.js::use -calls-> src/proto.js::Params::render"));
     assert!(has("src/lib.rs::run -calls-> src/lib.rs::Service::call"));
     assert!(has("src/wrap.rs::go -calls-> src/wrap.rs::Inner::work"));
     assert!(has("tests/test_worker.py::test_go -calls-> app/models.py::Worker::go"));
@@ -104,8 +104,8 @@ fn gap_rule_edits_remain_equal_to_full_rebuild() {
                 assert!(has("src/use.ts::caller -calls-> src/impl.ts::other"));
                 assert!(!has("src/use.ts::caller -calls-> src/impl.ts::realImpl"));
             }
-            5 => assert!(!has("src/proto.js::use -calls-> src/proto.js::render")),
-            6 => assert!(has("src/proto.js::use -calls-> src/proto.js::render")),
+            5 => assert!(!has("src/proto.js::use -calls-> src/proto.js::Params::render")),
+            6 => assert!(has("src/proto.js::use -calls-> src/proto.js::Params::render")),
             7 => assert!(!has("src/lib.rs::run -calls-> src/lib.rs::Service::call")),
             8 => {
                 assert!(has("src/wrap.rs::go -calls-> src/wrap.rs::Other::work"));
