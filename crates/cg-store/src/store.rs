@@ -181,7 +181,7 @@ impl Store {
         {
             let mut f = File::create(&tmp)?;
             f.write_all(&serde_json::to_vec_pretty(m).expect("manifest json"))?;
-            sync_file(&f, self.fsync, light)?;
+            sync_file(&f, self.fsync, true)?;
         }
         std::fs::rename(&tmp, self.manifest_path())?; // the commit point
         sync_dir(&self.dir, self.fsync, light);
