@@ -94,7 +94,9 @@ impl Graph {
         e.kind == EdgeKind::References && self.view.edge_meta(e.eid).is_some_and(|m| m.contains("\"fnRef\":true"))
     }
 
-    /// True when `e` crosses a process/tier boundary (HTTP client, queue job, event bus/socket, Celery).
+    /// True when `e` crosses a process/tier boundary (HTTP client, queue job, socket event, Celery).
+    /// Local in-process `eventEmitter.emit()` -> `@OnEvent` links carry no `"tier"` field and stay
+    /// in-process.
     pub fn is_cross_tier(&self, e: &EdgeRef) -> bool {
         if !is_synth(e) {
             return false;
@@ -103,7 +105,6 @@ impl Graph {
         meta.contains("\"tier\"")
             || meta.contains("\"synthesizedBy\":\"http-client\"")
             || meta.contains("\"synthesizedBy\":\"queue-job\"")
-            || meta.contains("\"synthesizedBy\":\"event-bus\"")
             || meta.contains("\"synthesizedBy\":\"celery-dispatch\"")
     }
 

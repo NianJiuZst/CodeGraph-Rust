@@ -2387,7 +2387,8 @@ impl<'e, 'v> FileCx<'e, 'v> {
         self.member_call(wcx, t, path, method, conf, None)
     }
 
-    /// `member_of` for a call: its arguments pick among overloads of the final member.
+    /// `member_of` for a call: its arguments pick among overloads of the final member, and `r`
+    /// identifies the call site for dispatch-receiver-scoped Kotlin member extensions.
     fn member_call(
         &self,
         wcx: &mut WorkerCx<'e, 'v>,
@@ -2395,7 +2396,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
         path: &[&str],
         method: &str,
         conf: u8,
-        args: Option<(&CallArgs<'v>, &RefRec)>,
+        call: Option<(Option<&CallArgs<'v>>, &RefRec)>,
     ) -> Outcome {
         for (i, f) in path.iter().enumerate() {
             t = self.cpp_unalias(wcx, t);
@@ -2425,15 +2426,65 @@ impl<'e, 'v> FileCx<'e, 'v> {
             }
         }
         t = self.cpp_unalias(wcx, t);
-        if let Some((a, r)) = args {
+        if let Some((Some(a), r)) = call {
             if let Some(m) = self.overloaded_member(wcx, t, method, Some(a), r) {
                 return Outcome::found(m, by::RECEIVER, conf);
             }
         }
         match self.rust_member(wcx, t, method) {
             Some((m, _)) => Outcome::found(m, by::RECEIVER, conf),
-            None => Outcome::st(status::NO_CANDIDATE),
+            None => {
+                if self.lang == Lang::Kotlin {
+                    if let Some((_, r)) = call {
+                        if let Some(m) = self.kotlin_member_extension(r.from, t, method) {
+                            return Outcome::found(m, by::RECEIVER, conf);
+                        }
+                    }
+                }
+                Outcome::st(status::NO_CANDIDATE)
+            }
         }
+    }
+
+    /// Kotlin member extension `fun Recv.ext()` declared inside an enclosing class `Owner`
+    /// (or a non-private one in an ancestor of `Owner`). Only visible when `Owner` is a dispatch
+    /// receiver in scope at `from`.
+    fn kotlin_member_extension(&self, from: NodeIdx, receiver: NodeIdx, method: &str) -> Option<NodeIdx> {
+        let view = self.view;
+        let mut visible: SmallVec<[NodeIdx; 8]> = SmallVec::new();
+        let mut cur = self.enclosing_type(from);
+        for _ in 0..8 {
+            let Some(ty) = cur else { break };
+            visible.push(ty);
+            cur = view.node(ty).parent().filter(|p| kind_of(view, *p).is_type());
+        }
+        if visible.is_empty() {
+            return None;
+        }
+        let own_len = visible.len();
+        for i in 0..own_len {
+            for a in self.e.ancestors(visible[i]) {
+                if !visible.contains(&a) {
+                    visible.push(a);
+                }
+            }
+        }
+        let q = format!("{}::{}", view.node(receiver).name(), method);
+        for (idx, &owner) in visible.iter().enumerate() {
+            let allow_private = idx < own_len;
+            if let Some(m) = view
+                .by_qname(&q)
+                .filter(|&c| {
+                    view.file(view.hot(c).file).lang() == Lang::Kotlin
+                        && view.node(c).parent() == Some(owner)
+                        && (allow_private || view.node(c).visibility() != cg_core::Visibility::Private)
+                })
+                .min_by_key(|&c| (view.file(view.hot(c).file).path(), view.node(c).start_line()))
+            {
+                return Some(m);
+            }
+        }
+        None
     }
 
     /// Method of an untyped receiver: only when the name is unique in the language family.
@@ -2624,7 +2675,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
     fn call_member(&self, wcx: &mut WorkerCx<'e, 'v>, r: &RefRec, root: &str, path: &[&str], method: &str, args: Option<&CallArgs<'v>>) -> Outcome {
         let scope = self.scope_at(r.line, r.col);
         let view = self.view;
-        let call = args.map(|a| (a, r));
+        let call = Some((args, r));
         // PHP `\Vendor\Lib\Logger::make()`: a namespaced root is resolved as written, never
         // reduced to a same-named project class
         if self.family == LangFamily::Php && root.contains('\\') {
@@ -2875,7 +2926,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
         root: &str,
         path: &[&str],
         method: &str,
-        call: Option<(&CallArgs<'v>, &RefRec)>,
+        call: Option<(Option<&CallArgs<'v>>, &RefRec)>,
     ) -> Option<Outcome> {
         let view = self.view;
         let mut t = self.enclosing_type(r.from);
@@ -2926,13 +2977,13 @@ impl<'e, 'v> FileCx<'e, 'v> {
             return if fields.is_empty() { self.fallback_method(method) } else { Outcome::st(status::NO_CANDIDATE) };
         };
         let _ = kw;
-        let o = self.member_call(wcx, t, fields, method, 95, args.map(|a| (a, r)));
+        let o = self.member_call(wcx, t, fields, method, 95, Some((args, r)));
         if o.status == status::RESOLVED {
             return o;
         }
         // `self.m()` in `extension Outer.Inner`: the nested declaration's member
         if let Some(d) = self.is_swift_extension(t).then(|| self.swift_declaration(t)).flatten().filter(|d| *d != t) {
-            let o = self.member_call(wcx, d, fields, method, 95, args.map(|a| (a, r)));
+            let o = self.member_call(wcx, d, fields, method, 95, Some((args, r)));
             if o.status == status::RESOLVED {
                 return o;
             }
@@ -3014,7 +3065,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
             }
         };
         let Some(t) = value.and_then(|v| v.method_receiver(method)) else { return Outcome::st(status::NO_CANDIDATE) };
-        self.member_call(wcx, t, &[], method, 85, args.map(|a| (a, r)))
+        self.member_call(wcx, t, &[], method, 85, Some((args, r)))
     }
 
     /// A namespace-qualified callable (`fmt::detail::write`, `Ns.Util.Run`, `Rack::Utils.escape`)
@@ -3486,10 +3537,10 @@ impl<'e, 'v> FileCx<'e, 'v> {
             Shape::This { kw, fields, method } => self.call_this(wcx, r, kw, &fields, method, args),
             Shape::Super { method } => self.call_super(wcx, r, method, args),
             Shape::New { class, method } => match self.lookup_type_at(wcx, class, r.line) {
-                TypeRes::Node(t) => self.member_call(wcx, t, &[], method, 90, args.map(|a| (a, r))),
+                TypeRes::Node(t) => self.member_call(wcx, t, &[], method, 90, Some((args, r))),
                 TypeRes::External => Outcome::st(status::EXTERNAL),
                 _ => match self.es5_constructor(wcx, class).filter(|_| self.family == LangFamily::Js) {
-                    Some(c) => self.member_call(wcx, c, &[], method, 85, args.map(|a| (a, r))),
+                    Some(c) => self.member_call(wcx, c, &[], method, 85, Some((args, r))),
                     None => Outcome::st(status::NO_CANDIDATE),
                 },
             },
@@ -3497,7 +3548,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
             Shape::ValueResult { inner, method } => {
                 let value = self.expression_value(wcx, inner, self.scope_at(r.line, r.col), r.line, 0);
                 match value.and_then(|v| v.method_receiver(method)) {
-                    Some(t) => self.js_first_overload(self.member_call(wcx, t, &[], method, 85, args.map(|a| (a, r)))),
+                    Some(t) => self.js_first_overload(self.member_call(wcx, t, &[], method, 85, Some((args, r)))),
                     None => Outcome::st(status::NO_CANDIDATE),
                 }
             }

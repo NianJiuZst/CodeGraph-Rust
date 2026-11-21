@@ -128,6 +128,21 @@ fn affected_includes_same_package_deps_and_gates_cross_tier_edges() {
     let fg_cross = g.dependent_files_graph(true);
     let with_tier: Vec<&str> = g.affected_files(&fg_cross, &[routes], 5).into_iter().filter(|f| g.is_test_file(*f)).map(|f| g.path(f)).collect();
     assert!(with_tier.contains(&"client/api.test.ts"), "--cross-tier should reach client test: {with_tier:?}");
+
+    // Local in-process eventEmitter.emit() -> @OnEvent handler has no tier boundary, so default affected includes it.
+    let dir2 = tempfile::tempdir().unwrap();
+    let r2 = dir2.path();
+    write(r2, "package.json", r#"{"name":"events"}"#);
+    write(r2, "src/listener.ts", "export class OrderListener {\n  @OnEvent('order.created')\n  handleOrder(id: string) { return id; }\n}\n");
+    write(r2, "src/service.ts", "export class OrderService {\n  create(eventEmitter: any) { eventEmitter.emit('order.created', '1'); }\n}\n");
+    write(r2, "src/service.test.ts", "import { OrderService } from './service';\nexport function testCreate() { new OrderService().create(null); }\n");
+    index_project(r2, &index_opts()).unwrap();
+    let proj2 = Project::locate(r2).unwrap();
+    let g2 = &proj2.graph;
+    let listener = g2.view.file_by_path("src/listener.ts").unwrap();
+    let fg2 = g2.dependent_files_graph(false);
+    let local_aff: Vec<&str> = g2.affected_files(&fg2, &[listener], 5).into_iter().filter(|f| g2.is_test_file(*f)).map(|f| g2.path(f)).collect();
+    assert!(local_aff.contains(&"src/service.test.ts"), "in-process @OnEvent listener should affect emitter test: {local_aff:?}");
 }
 
 #[test]

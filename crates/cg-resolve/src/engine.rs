@@ -818,18 +818,16 @@ impl<'v> Engine<'v> {
         }
     }
 
-    /// Kotlin `fun Lockable.awaitNanos()` (top-level or member extension inside another class):
-    /// the kernel names it `Lockable::awaitNanos`, without the package. One in `t`'s package
-    /// first, else the only one.
+    /// Top-level Kotlin `fun Lockable.awaitNanos()`: the kernel names it `Lockable::awaitNanos`,
+    /// without the package. Member extensions declared inside another class are scoped to their
+    /// dispatch receiver in `FileCx::kotlin_member_extension`. One in `t`'s package first, else
+    /// the only one.
     fn kotlin_extension(&self, t: NodeIdx, name: &str) -> Option<NodeIdx> {
         let view = self.view;
         let tn = view.node(t);
         let mut cands: SmallVec<[NodeIdx; 4]> = view
             .by_qname(&format!("{}::{}", tn.name(), name))
-            .filter(|&c| {
-                view.file(view.hot(c).file).lang() == Lang::Kotlin
-                    && view.node(c).parent().is_none_or(|p| !view.node(p).kind().is_type() || view.node(p).name() != tn.name())
-            })
+            .filter(|&c| view.file(view.hot(c).file).lang() == Lang::Kotlin && view.node(c).parent().is_none_or(|p| !view.node(p).kind().is_type()))
             .collect();
         cands.sort_by_key(|&c| (view.file(view.hot(c).file).path(), view.node(c).start_line()));
         let tpkg = self.modules.pkg_of(tn.file());

@@ -142,3 +142,72 @@ fn v164_resolution_edits_match_full_rebuild() {
         }
     }
 }
+
+#[test]
+fn codex_review_sync_edge_cases_match_full_rebuild() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let initial: &[(&str, &str)] = &[
+        // P1-1: TS barrel re-exporting an aliased local import
+        ("package.json", r#"{"name":"barrel"}"#),
+        ("ts/a.ts", "export function run() { return 1; }\n"),
+        ("ts/b.ts", "export function run() { return 2; }\n"),
+        ("ts/barrel.ts", "import { run as inner } from './a';\nexport { inner as execute };\n"),
+        ("ts/use.ts", "import { execute } from './barrel';\nexport function go() { return execute(); }\n"),
+        // P1-2: PHP function-body include whose target file does not exist yet
+        ("php/loader.php", "<?php\nfunction loadCfg() {\n    return require __DIR__ . '/config.php';\n}\n"),
+        // P1-3: Go package var whose declared interface changes while initializer text stays identical
+        ("go.mod", "module example.com/codex\n\ngo 1.22\n"),
+        (
+            "gvar/types.go",
+            "package gvar\n\ntype Reader interface { Close() error }\ntype Writer interface { Close() error }\nfunc openBackend() any { return nil }\nvar Backend Reader = openBackend()\n",
+        ),
+        ("gvar/use.go", "package gvar\n\nfunc Shut() error { return Backend.Close() }\n"),
+        // P2-1: PHP case-insensitive method override added in child class
+        ("php/base.php", "<?php\nclass BaseGreeter {\n    public function sayHello() { return 1; }\n}\n"),
+        ("php/child.php", "<?php\nclass ChildGreeter extends BaseGreeter {\n}\n"),
+        ("php/caller.php", "<?php\nfunction invoke(ChildGreeter $c) { return $c->SAYHELLO(); }\n"),
+    ];
+    let mut rels: Vec<&str> = initial.iter().map(|(r, _)| *r).collect();
+    for (i, (rel, text)) in initial.iter().enumerate() {
+        write(root, rel, text, i as u64);
+    }
+    index_project(root, &opts()).unwrap();
+    let has = |needle: &str| edges(root).iter().any(|e| e == needle);
+    assert!(has("ts/use.ts::go -calls-> ts/a.ts::run"), "{:#?}", edges(root));
+    assert!(has("gvar/use.go::Shut -calls-> gvar/types.go::Reader::Close"), "{:#?}", edges(root));
+    assert!(has("php/caller.php::invoke -calls-> php/base.php::BaseGreeter::sayHello"), "{:#?}", edges(root));
+
+    // Step 0 (P1-1): switch TS barrel import from ./a to ./b
+    write(root, "ts/barrel.ts", "import { run as inner } from './b';\nexport { inner as execute };\n", 100);
+    let r = sync(root, &SyncOptions { index: opts(), ..Default::default() }).unwrap();
+    assert!(r.full_rebuild.is_none());
+    assert_eq!(graph(root), fresh(root, &rels), "P1-1 TS barrel alias mismatch");
+    assert!(has("ts/use.ts::go -calls-> ts/b.ts::run"));
+    assert!(!has("ts/use.ts::go -calls-> ts/a.ts::run"));
+
+    // Step 1 (P1-2): add previously missing php/config.php with no symbol definitions
+    write(root, "php/config.php", "<?php\nreturn [];\n", 101);
+    rels.push("php/config.php");
+    let r = sync(root, &SyncOptions { index: opts(), ..Default::default() }).unwrap();
+    assert!(r.full_rebuild.is_none());
+    assert_eq!(graph(root), fresh(root, &rels), "P1-2 PHP added include target mismatch");
+    assert!(has("php/loader.php::loadCfg -imports-> php/config.php"));
+
+    // Step 2 (P1-3): change Go package var declared interface Reader -> Writer
+    let cur = std::fs::read_to_string(root.join("gvar/types.go")).unwrap();
+    write(root, "gvar/types.go", &cur.replace("var Backend Reader = openBackend()", "var Backend Writer = openBackend()"), 102);
+    let r = sync(root, &SyncOptions { index: opts(), ..Default::default() }).unwrap();
+    assert!(r.full_rebuild.is_none());
+    assert_eq!(graph(root), fresh(root, &rels), "P1-3 Go package var declared type mismatch");
+    assert!(has("gvar/use.go::Shut -calls-> gvar/types.go::Writer::Close"));
+    assert!(!has("gvar/use.go::Shut -calls-> gvar/types.go::Reader::Close"));
+
+    // Step 3 (P2-1): add lowercase/mixed-case override sayHello() in PHP child class
+    write(root, "php/child.php", "<?php\nclass ChildGreeter extends BaseGreeter {\n    public function sayHello() { return 2; }\n}\n", 103);
+    let r = sync(root, &SyncOptions { index: opts(), ..Default::default() }).unwrap();
+    assert!(r.full_rebuild.is_none());
+    assert_eq!(graph(root), fresh(root, &rels), "P2-1 PHP case-insensitive override mismatch");
+    assert!(has("php/caller.php::invoke -calls-> php/child.php::ChildGreeter::sayHello"));
+    assert!(!has("php/caller.php::invoke -calls-> php/base.php::BaseGreeter::sayHello"));
+}

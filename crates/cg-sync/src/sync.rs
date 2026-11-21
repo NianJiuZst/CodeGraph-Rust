@@ -322,6 +322,7 @@ fn resolver_fact_sig(view: &View, f: FileId) -> ResolverFactSig {
                 || b.kind == BindKind::CommonJsObject as u8
                 || b.kind == BindKind::MacroNamespace as u8
                 || b.kind == BindKind::Field as u8
+                || (b.kind == BindKind::Local as u8 && view.file(f).lang() == cg_core::Lang::Go && b.scope.0 == scope_base)
         })
         .map(|b| {
             // A field's declared type or initializer can redirect calls in unchanged
@@ -609,8 +610,8 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
     ph.lap("draft");
     let mut engine = pool.install(|| Engine::build_with_budget(&view1, &project, budget));
     if project.web_root.is_none() && !engine.modules.php_web_roots().is_empty() {
-        let php_touched = d.added.iter().any(|e| e.rel.ends_with(".php"))
-            || d.replaced.iter().any(|(_, e)| e.rel.ends_with(".php"))
+        let php_touched = d.added.iter().any(|e| e.lang == cg_core::Lang::Php)
+            || d.replaced.iter().any(|(_, e)| e.lang == cg_core::Lang::Php)
             || d.removed.iter().any(|f| base_view.file(*f).lang() == cg_core::Lang::Php);
         if php_touched {
             let old_mods = cg_resolve::Modules::build(&base_view, &project);
@@ -735,7 +736,7 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                             changed_receivers.insert(dep);
                         }
                     }
-                } else if kind == BindKind::ReturnType as u8 {
+                } else if kind == BindKind::ReturnType as u8 || kind == BindKind::Local as u8 {
                     if !fact.1.is_empty() {
                         changed_receivers.insert(fact.1.clone());
                     }
@@ -778,6 +779,20 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                     broad_export_changed.push(*f);
                 } else {
                     record_sym(*f, &imp.0, &mut d_names, &mut symbol_export_changed);
+                    // Propagate under every public export name backed by local `imp.0`
+                    // (e.g. `export { inner as execute }` or `export default inner`).
+                    for view in [&base_view, &view1] {
+                        for ex in view.exports_of(*f) {
+                            if view.text_str(ex.from_spec).is_empty() && ex.node.is_none() && view.text_str(ex.from_name) == imp.0 {
+                                let ename = view.text_str(ex.name);
+                                if ename.is_empty() || ename == "default" {
+                                    broad_export_changed.push(*f);
+                                } else {
+                                    record_sym(*f, ename, &mut d_names, &mut symbol_export_changed);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             if js_twin_order_sig(&base_view, *f) != js_twin_order_sig(&view1, *f) {
@@ -982,6 +997,12 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
         }
     }
     let tail_ids: FxHashSet<u32> = d_names.iter().filter_map(|n| base.names.find(n.as_bytes())).map(|s| s.0).collect();
+    // PHP method/function lookup is ASCII case-insensitive (#3297): fold `d_names` when any PHP
+    // file changed so an unchanged `$x->SAYHELLO()` invalidates when `sayHello()` changes.
+    let php_changed =
+        ids.iter().any(|f| view1.file(*f).lang() == cg_core::Lang::Php) || removed.iter().any(|f| base_view.file(*f).lang() == cg_core::Lang::Php);
+    let php_tails_lower: FxHashSet<String> = if php_changed { d_names.iter().map(|n| n.to_ascii_lowercase()).collect() } else { FxHashSet::default() };
+    let php_file_added = d.added.iter().any(|e| e.lang == cg_core::Lang::Php);
     for dir in &fixture_dirs {
         for (fi, rec) in base.p.files.iter().enumerate() {
             let path = base.paths.get(rec.path);
@@ -1027,9 +1048,12 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
         }
         if !file_hit {
             let check_receivers = !changed_receivers.is_empty();
+            let is_php_file = cg_core::Lang::from_u8(rec.lang) == cg_core::Lang::Php;
+            let check_php_ci = is_php_file && !php_tails_lower.is_empty();
+            let check_php_includes = is_php_file && php_file_added;
             for i in 0..rec.ref_count {
                 let r = &base.p.refs[(rec.ref_start + i) as usize];
-                let by_tail = tail_ids.contains(&r.tail.0);
+                let by_tail = tail_ids.contains(&r.tail.0) || (check_php_ci && php_tails_lower.contains(&base.names.get(r.tail).to_ascii_lowercase()));
                 let by_dead = r.status == status::RESOLVED && is_dead(r.target.0) && !remap.contains_key(&r.target.0);
                 let by_recv = check_receivers && {
                     let name = base.text.get(r.name);
@@ -1039,12 +1063,23 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                             !head.is_empty() && changed_receivers.contains(head)
                         })
                 };
-                if by_tail || by_dead || by_recv {
+                // Function-body PHP `require`/`include` has no `ImportFact`, so re-check unresolved
+                // import refs when a new PHP file is added.
+                let by_php_inc = check_php_includes
+                    && r.status != status::RESOLVED
+                    && RefKind::from_wire(r.kind) == Some(RefKind::Edge(EdgeKind::Imports))
+                    && matches!(engine.modules.resolve_import(cg_core::Lang::Php, base.text.get(r.name), FileId(fi as u32)), cg_resolve::ImportTarget::File(_));
+                if by_tail || by_dead || by_recv || by_php_inc {
                     file_hit = true;
                     hit_tail += by_tail as usize;
                     hit_dead += by_dead as usize;
                     if debug {
-                        eprintln!("sync: {} hit by {} ref {:?}", base.paths.get(rec.path), if by_tail { "tail" } else { "dead/recv" }, base.text.get(r.name));
+                        eprintln!(
+                            "sync: {} hit by {} ref {:?}",
+                            base.paths.get(rec.path),
+                            if by_tail { "tail" } else { "dead/recv/inc" },
+                            base.text.get(r.name)
+                        );
                     }
                     break;
                 }

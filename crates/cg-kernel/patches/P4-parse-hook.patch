@@ -55,14 +55,14 @@ diff -ruN a/src/go.rs b/src/go.rs
 diff -ruN a/src/hooks.rs b/src/hooks.rs
 --- a/src/hooks.rs	1970-01-01 08:00:00
 +++ b/src/hooks.rs	2026-11-22 03:39:16
-@@ -0,0 +1,185 @@
-+//! Patch P4 - parse hook with thread-local cached parsers and throttled timeouts.
+@@ -0,0 +1,179 @@
++//! Patch P4 - parse hook with thread-local cached parsers and parse timeouts.
 +//!
 +//! Every walker parses through [`parse_lang`] (or [`parse_lang_with_rewrite`]), which:
 +//!  1. reuses one `tree_sitter::Parser` per language per worker thread instead of
 +//!     allocating and calling `set_language` on every file,
-+//!  2. enforces the per-file parse timeout (design doc 4.4) with a 4096-step
-+//!     throttled `Instant::now()` check inside tree-sitter's progress callback, and
++//!  2. enforces the per-file parse timeout (design doc 4.4) inside tree-sitter's
++//!     already-sampled progress callback (~every 100 parser ops), and
 +//!  3. stashes a clone of the finished syntax tree in a thread-local so that
 +//!     `cg-extract` can build facts tables from the SAME parse instead of parsing twice.
 +//!
@@ -73,10 +73,6 @@ diff -ruN a/src/hooks.rs b/src/hooks.rs
 +use tree_sitter::{ParseOptions, Parser, Tree};
 +
 +const LANG_SLOTS: usize = 14;
-+/// Check the wall clock once every 4096 tree-sitter parse progress callbacks.
-+/// 4096 steps take a few tens of microseconds, so deadlines remain tight while
-+/// eliminating per-token clock overhead across millions of tokens.
-+const CLOCK_CHECK_MASK: u32 = 4095;
 +
 +fn lang_slot(lang: &str) -> Option<usize> {
 +    match lang {
@@ -156,10 +152,8 @@ diff -ruN a/src/hooks.rs b/src/hooks.rs
 +            }
 +            let deadline = Instant::now() + limit;
 +            let mut expired = false;
-+            let mut steps: u32 = 0;
 +            let mut progress = |_: &tree_sitter::ParseState| {
-+                steps = steps.wrapping_add(1);
-+                if (steps & CLOCK_CHECK_MASK) == 0 && Instant::now() >= deadline {
++                if Instant::now() >= deadline {
 +                    expired = true;
 +                    true // cancel
 +                } else {

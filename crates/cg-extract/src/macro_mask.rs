@@ -166,12 +166,10 @@ pub fn rust_item_wrappers(src: &str, timeout: Duration) -> Mask {
     let bytes = src.as_bytes();
     let deadline = Instant::now() + timeout;
     let mut expired = false;
-    let mut steps = 0u32;
     let mut cancel = |_: &tree_sitter::ParseState| {
-        steps = steps.wrapping_add(1);
-        if steps & 4095 == 0 {
-            expired = Instant::now() >= deadline;
-            expired
+        if Instant::now() >= deadline {
+            expired = true;
+            true
         } else {
             false
         }

@@ -255,3 +255,18 @@ fn cpp_declaration_only_header_detected_as_cpp() {
     let edges = dump::dump_edges(&view);
     has(&edges, "use.cc::run -calls-> api.cc::load_symbol");
 }
+
+#[test]
+fn kotlin_member_extensions_are_scoped_to_their_enclosing_class() {
+    let e = index_edges(&[
+        ("Editor.kt", "package demo\nclass Editor\n"),
+        ("ClassA.kt", "package demo\nclass ClassA {\n    private fun Editor.save() {}\n    fun useA(e: Editor) { e.save() }\n}\n"),
+        ("ClassB.kt", "package demo\nclass ClassB {\n    private fun Editor.save() {}\n    fun useB(e: Editor) { e.save() }\n}\n"),
+        ("ClassC.kt", "package demo\nclass ClassC {\n    fun useC(e: Editor) { e.save() }\n}\n"),
+    ]);
+    has(&e, "ClassA.kt::demo::ClassA::useA -calls-> ClassA.kt::Editor::save");
+    has(&e, "ClassB.kt::demo::ClassB::useB -calls-> ClassB.kt::Editor::save");
+    lacks(&e, "ClassB.kt::demo::ClassB::useB -calls-> ClassA.kt::Editor::save");
+    lacks(&e, "ClassC.kt::demo::ClassC::useC -calls-> ClassA.kt::Editor::save");
+    lacks(&e, "ClassC.kt::demo::ClassC::useC -calls-> ClassB.kt::Editor::save");
+}

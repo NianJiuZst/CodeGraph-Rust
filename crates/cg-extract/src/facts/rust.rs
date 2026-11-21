@@ -83,10 +83,8 @@ fn conditional_items(cx: &mut Cx, root: Node) -> Option<Tree> {
     }
     let deadline = Instant::now() + cx.parse_timeout;
     let mut expired = false;
-    let mut steps: u32 = 0;
     let mut cancel = |_: &tree_sitter::ParseState| {
-        steps = steps.wrapping_add(1);
-        if (steps & 4095) == 0 && Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             expired = true;
             true
         } else {

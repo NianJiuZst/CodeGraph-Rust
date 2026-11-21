@@ -1,10 +1,10 @@
-//! Patch P4 - parse hook with thread-local cached parsers and throttled timeouts.
+//! Patch P4 - parse hook with thread-local cached parsers and parse timeouts.
 //!
 //! Every walker parses through [`parse_lang`] (or [`parse_lang_with_rewrite`]), which:
 //!  1. reuses one `tree_sitter::Parser` per language per worker thread instead of
 //!     allocating and calling `set_language` on every file,
-//!  2. enforces the per-file parse timeout (design doc 4.4) with a 4096-step
-//!     throttled `Instant::now()` check inside tree-sitter's progress callback, and
+//!  2. enforces the per-file parse timeout (design doc 4.4) inside tree-sitter's
+//!     already-sampled progress callback (~every 100 parser ops), and
 //!  3. stashes a clone of the finished syntax tree in a thread-local so that
 //!     `cg-extract` can build facts tables from the SAME parse instead of parsing twice.
 //!
@@ -15,10 +15,6 @@ use std::time::{Duration, Instant};
 use tree_sitter::{ParseOptions, Parser, Tree};
 
 const LANG_SLOTS: usize = 14;
-/// Check the wall clock once every 4096 tree-sitter parse progress callbacks.
-/// 4096 steps take a few tens of microseconds, so deadlines remain tight while
-/// eliminating per-token clock overhead across millions of tokens.
-const CLOCK_CHECK_MASK: u32 = 4095;
 
 fn lang_slot(lang: &str) -> Option<usize> {
     match lang {
@@ -98,10 +94,8 @@ fn parse_with_parser(parser: &mut Parser, source: &str) -> Result<Tree, String> 
             }
             let deadline = Instant::now() + limit;
             let mut expired = false;
-            let mut steps: u32 = 0;
             let mut progress = |_: &tree_sitter::ParseState| {
-                steps = steps.wrapping_add(1);
-                if (steps & CLOCK_CHECK_MASK) == 0 && Instant::now() >= deadline {
+                if Instant::now() >= deadline {
                     expired = true;
                     true // cancel
                 } else {
