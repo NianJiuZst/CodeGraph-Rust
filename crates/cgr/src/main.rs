@@ -105,6 +105,12 @@ enum Cmd {
         format: String,
         #[arg(long)]
         no_metadata: bool,
+        /// Show only test files
+        #[arg(long, conflicts_with = "no_tests")]
+        tests: bool,
+        /// Exclude test files
+        #[arg(long)]
+        no_tests: bool,
         #[arg(long)]
         max_depth: Option<usize>,
     },
@@ -133,7 +139,12 @@ enum Cmd {
         depth: u32,
     },
     /// Implementations / subtypes of an interface, abstract class or method
-    Implementations { symbol: String },
+    Implementations {
+        symbol: String,
+        /// Maximum inheritance depth to traverse
+        #[arg(short, long, default_value_t = 10)]
+        depth: u32,
+    },
     /// Test files affected by changes to the given files
     Affected {
         files: Vec<String>,
@@ -145,6 +156,9 @@ enum Cmd {
         /// Only report files matching this glob
         #[arg(short, long)]
         filter: Option<String>,
+        /// Also follow links across a process boundary (HTTP client, queue job, event bus/socket, Celery)
+        #[arg(long)]
+        cross_tier: bool,
         #[arg(short = 'j', long)]
         json: bool,
         #[arg(short, long)]
@@ -363,12 +377,14 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Query { search, kind, limit, json } => cmds::query(base, &search, kind, limit, json),
         Cmd::Explore { query, max_files } => cmds::explore(base, &query.join(" "), max_files),
         Cmd::Node { symbol_or_file, code, file, offset, limit, symbols_only } => cmds::node(base, &symbol_or_file, code, file, offset, limit, symbols_only),
-        Cmd::Files { dir, pattern, format, no_metadata, max_depth } => cmds::files(base, dir, pattern, &format, !no_metadata, max_depth),
+        Cmd::Files { dir, pattern, format, no_metadata, tests, no_tests, max_depth } => {
+            cmds::files(base, dir, pattern, &format, !no_metadata, tests, no_tests, max_depth)
+        }
         Cmd::Callers { symbol, file, limit } => cmds::callers(base, &symbol, file, limit, true),
         Cmd::Callees { symbol, file, limit } => cmds::callers(base, &symbol, file, limit, false),
         Cmd::Impact { symbol, file, depth } => cmds::impact(base, &symbol, file, depth),
-        Cmd::Implementations { symbol } => cmds::implementations(base, &symbol),
-        Cmd::Affected { files, stdin, depth, filter, json, quiet } => cmds::affected(base, files, stdin, depth, filter, json, quiet),
+        Cmd::Implementations { symbol, depth } => cmds::implementations(base, &symbol, depth),
+        Cmd::Affected { files, stdin, depth, filter, cross_tier, json, quiet } => cmds::affected(base, files, stdin, depth, filter, cross_tier, json, quiet),
         Cmd::Cycles { path, json } => cmds::cycles(path.or(base), json),
         Cmd::Serve { mcp: _, http, token, no_watch } => cmds::serve(base, http, token, no_watch),
         Cmd::Install { agents, local, no_hook, no_permissions, dry_run, bin } => {

@@ -131,9 +131,13 @@ fn build(root: &Path, patterns: &[String]) -> Gitignore {
     b.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+}
+
 fn expand_tilde(s: &str) -> Option<PathBuf> {
-    if let Some(rest) = s.strip_prefix("~/") {
-        Some(PathBuf::from(std::env::var_os("HOME")?).join(rest))
+    if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")) {
+        Some(home_dir()?.join(rest))
     } else {
         Some(PathBuf::from(s))
     }
@@ -179,7 +183,8 @@ fn parse_gitconfig_excludes(text: &str) -> Option<Option<String>> {
 }
 
 fn global_excludes_file() -> Option<PathBuf> {
-    let xdg_cfg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    let home = home_dir();
+    let xdg_cfg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home.as_ref().map(|h| h.join(".config")));
     let candidates: Vec<PathBuf> = if let Some(p) = std::env::var_os("GIT_CONFIG_GLOBAL") {
         vec![PathBuf::from(p)]
     } else {
@@ -187,8 +192,8 @@ fn global_excludes_file() -> Option<PathBuf> {
         if let Some(xdg) = &xdg_cfg {
             v.push(xdg.join("git").join("config"));
         }
-        if let Some(home) = std::env::var_os("HOME") {
-            v.push(PathBuf::from(home).join(".gitconfig"));
+        if let Some(home) = &home {
+            v.push(home.join(".gitconfig"));
         }
         v
     };

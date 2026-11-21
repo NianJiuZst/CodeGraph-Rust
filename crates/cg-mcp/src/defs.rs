@@ -132,8 +132,10 @@ pub fn definition(short: &str) -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "path": {"type": "string", "description": "Filter to files under this directory path (e.g., \"src/components\"). Returns all files if not specified."},
                 "pattern": {"type": "string", "description": "Filter files matching this glob pattern (e.g., \"*.tsx\", \"**/*.test.ts\")"},
-                "format": {"type": "string", "description": "Output format: \"tree\" (hierarchical, default), \"flat\" (simple list), \"grouped\" (by language), \"package\" (by the nearest package.json or composer.json that names a package)", "enum": ["tree", "flat", "grouped", "package"], "default": "tree"},
+                "format": {"type": "string", "description": "Output format: \"tree\" (hierarchical, default), \"flat\" (simple list), \"grouped\" (by language), \"package\" (by nearest manifest: package.json, composer.json, Cargo.toml, go.mod, pyproject.toml, pom.xml, build.gradle)", "enum": ["tree", "flat", "grouped", "package"], "default": "tree"},
                 "includeMetadata": {"type": "boolean", "description": "Include file metadata like language and symbol count (default: true)", "default": true},
+                "testsOnly": {"type": "boolean", "description": "Only return test files (default: false)", "default": false},
+                "excludeTests": {"type": "boolean", "description": "Exclude test files (default: false)", "default": false},
                 "maxDepth": {"type": "number", "description": "Maximum directory depth to show (default: unlimited)"},
                 "projectPath": pp,
             }},

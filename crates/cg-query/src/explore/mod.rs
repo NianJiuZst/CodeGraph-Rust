@@ -4,6 +4,7 @@
 //! A/B results the design inherits.
 
 pub mod flow;
+pub mod one_symbol;
 pub mod window;
 
 use crate::graph::Graph;
@@ -137,6 +138,9 @@ impl Graph {
 
         // 1. normalise
         let q = query.split_whitespace().collect::<Vec<_>>().join(" ");
+        if let Some(res) = one_symbol::try_explore_one_symbol(self, &q, hard, opts) {
+            return res;
+        }
         let toks = tokenize_query(&q);
 
         // 2. pin files named by path

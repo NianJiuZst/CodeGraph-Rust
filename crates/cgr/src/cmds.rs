@@ -196,8 +196,18 @@ pub fn node(
     call(base, "node", args)
 }
 
-pub fn files(base: Option<PathBuf>, dir: Option<String>, pattern: Option<String>, format: &str, meta: bool, max_depth: Option<usize>) -> Result<i32> {
-    let mut args = json!({"format": format, "includeMetadata": meta});
+#[allow(clippy::too_many_arguments)]
+pub fn files(
+    base: Option<PathBuf>,
+    dir: Option<String>,
+    pattern: Option<String>,
+    format: &str,
+    meta: bool,
+    tests_only: bool,
+    exclude_tests: bool,
+    max_depth: Option<usize>,
+) -> Result<i32> {
+    let mut args = json!({"format": format, "includeMetadata": meta, "testsOnly": tests_only, "excludeTests": exclude_tests});
     if let Some(d) = dir {
         args["path"] = json!(d);
     }
@@ -226,7 +236,7 @@ pub fn impact(base: Option<PathBuf>, symbol: &str, file: Option<String>, depth: 
     call(base, "impact", args)
 }
 
-pub fn implementations(base: Option<PathBuf>, symbol: &str) -> Result<i32> {
+pub fn implementations(base: Option<PathBuf>, symbol: &str, depth: u32) -> Result<i32> {
     let proj = open(base)?;
     let g = &proj.graph;
     let nodes = g.resolve_symbol(symbol);
@@ -234,20 +244,27 @@ pub fn implementations(base: Option<PathBuf>, symbol: &str) -> Result<i32> {
         println!("Symbol \"{symbol}\" not found in the codebase");
         return Ok(0);
     }
-    let mut total = 0;
     for n in nodes {
-        let impls = g.implementations(n);
+        let impls = g.implementations(n, depth);
         println!("**Implementations of {} ({}:{}) — {} found**", g.qname(n), g.node_path(n), g.line(n), impls.len());
         for i in &impls {
             println!("- {} ({}) - {}:{}", g.name(*i), g.kind(*i), g.node_path(*i), g.line(*i));
         }
-        total += impls.len();
     }
-    let _ = total;
     Ok(0)
 }
 
-pub fn affected(base: Option<PathBuf>, mut files: Vec<String>, stdin: bool, depth: u32, filter: Option<String>, json_out: bool, quiet: bool) -> Result<i32> {
+#[allow(clippy::too_many_arguments)]
+pub fn affected(
+    base: Option<PathBuf>,
+    mut files: Vec<String>,
+    stdin: bool,
+    depth: u32,
+    filter: Option<String>,
+    cross_tier: bool,
+    json_out: bool,
+    quiet: bool,
+) -> Result<i32> {
     use std::io::BufRead;
     if stdin {
         for l in std::io::stdin().lock().lines() {
@@ -262,14 +279,14 @@ pub fn affected(base: Option<PathBuf>, mut files: Vec<String>, stdin: bool, dept
     let mut changed: Vec<FileId> = Vec::new();
     for f in &files {
         let rel = match Path::new(f).strip_prefix(proj.root()) {
-            Ok(r) => r.to_string_lossy().into_owned(),
-            Err(_) => f.trim_start_matches("./").to_owned(),
+            Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            Err(_) => f.replace('\\', "/").trim_start_matches("./").to_owned(),
         };
         if let Some(id) = g.view.file_by_path(&rel) {
             changed.push(id);
         }
     }
-    let graph = g.file_graph();
+    let graph = g.dependent_files_graph(cross_tier);
     let all = g.affected_files(&graph, &changed, depth);
     let matcher = filter.as_deref().and_then(|p| globset::Glob::new(p).ok()).map(|x| x.compile_matcher());
     let out: Vec<&str> = all

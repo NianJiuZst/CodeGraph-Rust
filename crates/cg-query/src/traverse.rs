@@ -40,6 +40,8 @@ pub struct Related {
     pub lines: Vec<u32>,
     /// `synthesizedBy` when the relationship comes from a synthesis pass.
     pub synth: Option<String>,
+    /// True when a `References` edge is a function/callback reference (`{"fnRef":true}`).
+    pub fn_ref: bool,
     pub depth: u32,
 }
 
@@ -87,6 +89,24 @@ impl Graph {
         v.get("registeredAt").and_then(|s| s.as_str()).map(str::to_owned)
     }
 
+    /// True when `e` is a function/callback reference (`{"fnRef":true}`).
+    pub fn is_fn_ref(&self, e: &EdgeRef) -> bool {
+        e.kind == EdgeKind::References && self.view.edge_meta(e.eid).is_some_and(|m| m.contains("\"fnRef\":true"))
+    }
+
+    /// True when `e` crosses a process/tier boundary (HTTP client, queue job, event bus/socket, Celery).
+    pub fn is_cross_tier(&self, e: &EdgeRef) -> bool {
+        if !is_synth(e) {
+            return false;
+        }
+        let Some(meta) = self.view.edge_meta(e.eid) else { return false };
+        meta.contains("\"tier\"")
+            || meta.contains("\"synthesizedBy\":\"http-client\"")
+            || meta.contains("\"synthesizedBy\":\"queue-job\"")
+            || meta.contains("\"synthesizedBy\":\"event-bus\"")
+            || meta.contains("\"synthesizedBy\":\"celery-dispatch\"")
+    }
+
     fn collect_related(&self, start: NodeIdx, depth: u32, limit: usize, reverse: bool) -> Vec<Related> {
         let mut out: Vec<Related> = Vec::new();
         let mut seen: FxHashSet<NodeIdx> = FxHashSet::default();
@@ -102,7 +122,7 @@ impl Graph {
                         return;
                     }
                     let i = *index.entry(other).or_insert_with(|| {
-                        grouped.push(Related { node: other, kind: e.kind, lines: Vec::new(), synth: None, depth: d });
+                        grouped.push(Related { node: other, kind: e.kind, lines: Vec::new(), synth: None, fn_ref: false, depth: d });
                         grouped.len() - 1
                     });
                     let g = &mut grouped[i];
@@ -113,6 +133,9 @@ impl Graph {
                     }
                     if g.synth.is_none() {
                         g.synth = self.synth_label(&e);
+                    }
+                    if !g.fn_ref && self.is_fn_ref(&e) {
+                        g.fn_ref = true;
                     }
                     // calls beat references for the displayed kind
                     if e.kind == EdgeKind::Calls {
@@ -283,11 +306,12 @@ impl Graph {
     }
 
     /// Implementations of an interface / abstract class or method: descendants of a type, or
-    /// the overriding methods of a method.
-    pub fn implementations(&self, n: NodeIdx) -> Vec<NodeIdx> {
+    /// the overriding methods of a method, up to `depth` inheritance hops.
+    pub fn implementations(&self, n: NodeIdx, depth: u32) -> Vec<NodeIdx> {
+        let depth = depth.max(1);
         let mut out: Vec<NodeIdx> = Vec::new();
         if self.kind(n).is_type() {
-            out.extend(self.hierarchy(n, 10).descendants.into_iter().map(|x| x.0));
+            out.extend(self.hierarchy(n, depth).descendants.into_iter().map(|x| x.0));
         } else {
             for e in self.view.in_edges(n) {
                 if e.kind == EdgeKind::Overrides {
@@ -297,7 +321,7 @@ impl Graph {
             // methods of subtypes with the same name
             if let Some(owner) = self.containers(n).first().copied() {
                 let name = self.name(n).to_owned();
-                for (sub, _) in self.hierarchy(owner, 10).descendants {
+                for (sub, _) in self.hierarchy(owner, depth).descendants {
                     for e in self.view.out_edges(sub) {
                         if e.kind == EdgeKind::Contains && self.name(e.dst) == name && self.kind(e.dst).is_callable() {
                             out.push(e.dst);
@@ -353,6 +377,83 @@ impl Graph {
             }
         }
         FileGraph { fwd, rev }
+    }
+
+    /// Build the full file-level dependency graph: imports, re-exports, and cross-file symbol
+    /// edges (calls, references, extends, implements, instantiates, overrides, ...).
+    /// When `include_cross_tier` is false, process-boundary edges (HTTP, queues, events, Celery)
+    /// are excluded so unit-test blast radius does not spill across mocked boundaries (#3320).
+    pub fn dependent_files_graph(&self, include_cross_tier: bool) -> FileGraph {
+        let total = self.view.files().map(|f| f.idx() + 1).max().unwrap_or(0);
+        let mut fwd: Vec<Vec<u32>> = vec![Vec::new(); total];
+        for f in self.view.files() {
+            let mut targets: Vec<u32> = Vec::new();
+            for imp in self.view.imports_of(f) {
+                if imp.target.is_some() && imp.target != f && !self.view.file_removed(imp.target) {
+                    targets.push(imp.target.0);
+                }
+            }
+            for ex in self.view.exports_of(f) {
+                if ex.target.is_some() && ex.target != f && !self.view.file_removed(ex.target) {
+                    targets.push(ex.target.0);
+                }
+            }
+            for n in self.view.nodes_in_file(f) {
+                for e in self.view.out_edges(NodeIdx(n)) {
+                    if e.kind == EdgeKind::Contains {
+                        continue;
+                    }
+                    if !include_cross_tier && self.is_cross_tier(&e) {
+                        continue;
+                    }
+                    let tf = self.view.hot(e.dst).file;
+                    if tf != f && !self.view.file_removed(tf) {
+                        targets.push(tf.0);
+                    }
+                }
+            }
+            targets.sort_unstable();
+            targets.dedup();
+            fwd[f.idx()] = targets;
+        }
+        let mut rev: Vec<Vec<u32>> = vec![Vec::new(); total];
+        for (f, ts) in fwd.iter().enumerate() {
+            for t in ts {
+                rev[*t as usize].push(f as u32);
+            }
+        }
+        FileGraph { fwd, rev }
+    }
+
+    /// Direct dependent files of a single file `f` (imports, re-exports, and cross-file symbol
+    /// edges) without materializing the whole-repository file graph.
+    pub fn file_dependents(&self, f: FileId, include_cross_tier: bool) -> Vec<FileId> {
+        let mut seen: FxHashSet<FileId> = FxHashSet::default();
+        for n in self.view.nodes_in_file(f) {
+            for e in self.view.in_edges(NodeIdx(n)) {
+                if e.kind == EdgeKind::Contains {
+                    continue;
+                }
+                if !include_cross_tier && self.is_cross_tier(&e) {
+                    continue;
+                }
+                let sf = self.view.hot(e.src).file;
+                if sf != f && !self.view.file_removed(sf) {
+                    seen.insert(sf);
+                }
+            }
+        }
+        for u in self.view.files() {
+            if u == f || seen.contains(&u) {
+                continue;
+            }
+            if self.view.imports_of(u).iter().any(|imp| imp.target == f) || self.view.exports_of(u).iter().any(|ex| ex.target == f) {
+                seen.insert(u);
+            }
+        }
+        let mut out: Vec<FileId> = seen.into_iter().collect();
+        out.sort_by(|a, b| self.path(*a).cmp(self.path(*b)));
+        out
     }
 
     /// Files that depend (transitively, up to `depth`) on any of `changed`; `changed` included.

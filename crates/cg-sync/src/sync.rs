@@ -299,15 +299,14 @@ fn js_twin_order_sig(view: &View, f: FileId) -> Vec<(String, u8)> {
 /// stays the same (e.g. `obj.old = function internal` -> `obj.new = ...`, or the target of a
 /// Rust `impl Deref`, which has no node of its own).
 fn resolver_fact_sig(view: &View, f: FileId) -> ResolverFactSig {
-    let field_owners: FxHashMap<_, _> = if view.file(f).lang().family() == LangFamily::Rust {
-        view.nodes_in_file(f)
-            .map(|n| view.node(NodeIdx(n)))
-            .filter(|n| n.kind().is_type())
-            .map(|n| (cg_core::text::pack_pos(n.start_line(), n.start_col()), n.qname().to_owned()))
-            .collect()
-    } else {
-        FxHashMap::default()
-    };
+    let scopes = view.scopes_of(f);
+    let scope_base = view.scope_base(f);
+    let field_owners: FxHashMap<_, _> = view
+        .nodes_in_file(f)
+        .map(|n| view.node(NodeIdx(n)))
+        .filter(|n| n.kind().is_type())
+        .map(|n| (cg_core::text::pack_pos(n.start_line(), n.start_col()), n.qname().to_owned()))
+        .collect();
     view.bindings_of(f)
         .iter()
         .filter(|b| {
@@ -322,14 +321,18 @@ fn resolver_fact_sig(view: &View, f: FileId) -> ResolverFactSig {
                 || b.kind == BindKind::Mutation as u8
                 || b.kind == BindKind::CommonJsObject as u8
                 || b.kind == BindKind::MacroNamespace as u8
-                || (b.kind == BindKind::Field as u8 && view.file(f).lang().family() == LangFamily::Rust)
+                || b.kind == BindKind::Field as u8
         })
         .map(|b| {
-            // A Rust field's declared type can redirect a call in an unchanged
-            // importer. Include its owner: two structs may have the same field.
+            // A field's declared type or initializer can redirect calls in unchanged
+            // consumers (same-package siblings, subclasses, importers). Include its owner:
+            // two types may share a field name.
             let owner = if b.kind == BindKind::Field as u8 {
-                let scope = &view.scopes_of(f)[b.scope.0.wrapping_sub(view.scope_base(f)) as usize];
-                field_owners.get(&scope.start).cloned().unwrap_or_default()
+                if b.node.is_some() {
+                    view.node(b.node).qname().to_owned()
+                } else {
+                    scopes.get(b.scope.0.wrapping_sub(scope_base) as usize).and_then(|s| field_owners.get(&s.start)).cloned().unwrap_or_default()
+                }
             } else if b.node.is_some() {
                 view.node(b.node).qname().to_owned()
             } else {
@@ -638,8 +641,9 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
     // surgically through re-exporting barrels and value forwarders without blowing up unrelated
     // importers of the same package or barrel.
     let mut symbol_export_changed: FxHashMap<u32, FxHashSet<String>> = FxHashMap::default();
-    // Rust field type changes (`owner.field.m()` where ref tail is `m`, not `field`).
-    let mut changed_rust_fields: FxHashSet<String> = FxHashSet::default();
+    // Receiver segments whose type/initializer/return type changed (`recv.m()`, `fn().m()`,
+    // `pkg.Var.m()` where `r.tail` is `m`, not `recv`/`fn`/`Var`).
+    let mut changed_receivers: FxHashSet<String> = FxHashSet::default();
     let mut remap: FxHashMap<u32, u32> = FxHashMap::default();
     // pytest injects a fixture by parameter name, with no import: a changed fixture re-resolves
     // the Python files of its directory and below
@@ -649,6 +653,12 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
             d_names.insert(name.to_owned());
             sym_map.entry(f.0).or_default().insert(name.to_owned());
         }
+    };
+    let is_receiver_def = |kind: u8| {
+        matches!(
+            NodeKind::from_u8(kind),
+            Some(NodeKind::Variable | NodeKind::Constant | NodeKind::Property | NodeKind::Field | NodeKind::Function | NodeKind::Method)
+        )
     };
     for (i, f) in ids.iter().enumerate() {
         let old = if states[i] == DeltaState::Replaced { defs_of(&base_view, *f) } else { BTreeMap::new() };
@@ -660,6 +670,9 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
             // a changed signature or return type can move a call to another overload or redirect a receiver
             if old.get(k) != Some(details) {
                 record_sym(*f, &k.name, &mut d_names, &mut symbol_export_changed);
+                if is_receiver_def(k.kind) && !k.name.is_empty() {
+                    changed_receivers.insert(k.name.clone());
+                }
                 if is_js && matches!(NodeKind::from_u8(k.kind), Some(NodeKind::Function | NodeKind::Method | NodeKind::Component)) {
                     changed_js_fns.push(k.name.clone());
                 }
@@ -668,6 +681,9 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
         for k in old.keys() {
             if !new.contains_key(k) {
                 record_sym(*f, &k.name, &mut d_names, &mut symbol_export_changed);
+                if is_receiver_def(k.kind) && !k.name.is_empty() {
+                    changed_receivers.insert(k.name.clone());
+                }
                 if is_js && matches!(NodeKind::from_u8(k.kind), Some(NodeKind::Function | NodeKind::Method | NodeKind::Component)) {
                     changed_js_fns.push(k.name.clone());
                 }
@@ -709,15 +725,19 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                 if kind == BindKind::Fixture as u8 {
                     fixture_dirs.push(cg_resolve::project::parent_dir(view1.file(*f).path()).to_owned());
                 } else if kind == BindKind::Field as u8 {
-                    changed_rust_fields.insert(fact.1.clone());
+                    changed_receivers.insert(fact.1.clone());
                     // Another field in the same file initialized from this field
                     // (e.g. Python `cls.client = cls.client_class()`) changes type too.
                     for b in view1.bindings_of(*f) {
                         if b.kind == BindKind::Field as u8 && view1.text_str(b.init_ctor).contains(&fact.1) {
                             let dep = view1.text_str(b.name).to_owned();
                             record_sym(*f, &dep, &mut d_names, &mut symbol_export_changed);
-                            changed_rust_fields.insert(dep);
+                            changed_receivers.insert(dep);
                         }
+                    }
+                } else if kind == BindKind::ReturnType as u8 {
+                    if !fact.1.is_empty() {
+                        changed_receivers.insert(fact.1.clone());
                     }
                 } else if kind == BindKind::Mutation as u8 {
                     // `obj.member = fn`: record both the full dotted name and the bare member tail.
@@ -1006,21 +1026,25 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
             }
         }
         if !file_hit {
-            let check_rust_fields = !changed_rust_fields.is_empty() && cg_core::Lang::from_u8(rec.lang) == cg_core::Lang::Rust;
+            let check_receivers = !changed_receivers.is_empty();
             for i in 0..rec.ref_count {
                 let r = &base.p.refs[(rec.ref_start + i) as usize];
                 let by_tail = tail_ids.contains(&r.tail.0);
                 let by_dead = r.status == status::RESOLVED && is_dead(r.target.0) && !remap.contains_key(&r.target.0);
-                let by_field = check_rust_fields && {
+                let by_recv = check_receivers && {
                     let name = base.text.get(r.name);
-                    name.contains('.') && name.split('.').any(|seg| changed_rust_fields.contains(seg))
+                    (name.contains('.') || name.contains("::") || name.contains("->"))
+                        && name.split(['.', ':']).flat_map(|s| s.split("->")).any(|seg| {
+                            let head = seg.split('(').next().unwrap_or(seg);
+                            !head.is_empty() && changed_receivers.contains(head)
+                        })
                 };
-                if by_tail || by_dead || by_field {
+                if by_tail || by_dead || by_recv {
                     file_hit = true;
                     hit_tail += by_tail as usize;
                     hit_dead += by_dead as usize;
                     if debug {
-                        eprintln!("sync: {} hit by {} ref {:?}", base.paths.get(rec.path), if by_tail { "tail" } else { "dead/field" }, base.text.get(r.name));
+                        eprintln!("sync: {} hit by {} ref {:?}", base.paths.get(rec.path), if by_tail { "tail" } else { "dead/recv" }, base.text.get(r.name));
                     }
                     break;
                 }

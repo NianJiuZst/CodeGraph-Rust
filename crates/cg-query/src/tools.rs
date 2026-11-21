@@ -193,6 +193,24 @@ fn format_lines(lines: &[u32], max: usize) -> String {
     }
 }
 
+fn stale_banner_for_files(g: &Graph, files: impl IntoIterator<Item = FileId>) -> String {
+    let mut seen: rustc_hash::FxHashSet<FileId> = rustc_hash::FxHashSet::default();
+    let mut stale: Vec<String> = Vec::new();
+    for f in files {
+        if seen.len() >= 200 {
+            break;
+        }
+        if seen.insert(f) && g.file_is_stale(f) {
+            stale.push(g.path(f).to_owned());
+        }
+    }
+    if stale.is_empty() {
+        return String::new();
+    }
+    stale.sort();
+    format!("{}\n\n", strings::stale_banner(&stale))
+}
+
 fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput {
     let g = env.graph;
     let Some(symbol) = str_arg(args, "symbol") else {
@@ -212,15 +230,13 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
         String::new()
     };
     let title = if callers { "Callers of" } else { "Callees of" };
-    let collect = |defs: &[NodeIdx]| -> Vec<String> {
+    let collect = |defs: &[NodeIdx]| -> (Vec<String>, Vec<FileId>) {
         let mut seen: FxHashMap<NodeIdx, usize> = FxHashMap::default();
         type Row = (NodeIdx, Vec<u32>, EdgeKind, Option<String>, bool, bool);
         let mut rows: Vec<Row> = Vec::new();
         for d in defs {
             let rel = if callers { g.callers(*d, 1, 1000) } else { g.callees(*d, 1, 1000) };
             for r in rel {
-                // a function reference edge is marked in the edge metadata
-                let fn_ref = false;
                 match seen.get(&r.node) {
                     Some(i) => {
                         let row = &mut rows[*i];
@@ -229,15 +245,25 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
                                 row.1.push(l);
                             }
                         }
+                        if r.kind == EdgeKind::Calls {
+                            row.2 = EdgeKind::Calls;
+                        }
+                        if row.3.is_none() {
+                            row.3 = r.synth;
+                        }
+                        row.4 |= r.fn_ref;
                     }
                     None => {
                         seen.insert(r.node, rows.len());
-                        rows.push((r.node, r.lines, r.kind, r.synth, fn_ref, r.node == *d));
+                        rows.push((r.node, r.lines, r.kind, r.synth, r.fn_ref, r.node == *d));
                     }
                 }
             }
         }
-        rows.into_iter()
+        let mut files: Vec<FileId> = defs.iter().map(|d| g.view.hot(*d).file).collect();
+        files.extend(rows.iter().take(limit).map(|(n, ..)| g.view.hot(*n).file));
+        let formatted = rows
+            .into_iter()
             .map(|(n, mut lines, kind, synth, fn_ref, recursive)| {
                 lines.sort_unstable();
                 let loc = if lines.is_empty() { format!(":{}", g.line(n)) } else { format!(":{}", format_lines(&lines, 10)) };
@@ -245,25 +271,29 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
                 let itself = if recursive { " — calls itself" } else { "" };
                 format!("- {} ({}) - {}{loc}{label}{itself}", g.name(n), g.kind(n), g.node_path(n))
             })
-            .collect()
+            .collect();
+        (formatted, files)
     };
     if groups.len() == 1 {
-        let rows = collect(&groups[0]);
+        let (rows, files) = collect(&groups[0]);
+        let stale = stale_banner_for_files(g, files);
         if rows.is_empty() {
-            return ToolOutput::ok(format!("No {what} found for \"{symbol}\"{filter_note}"));
+            return ToolOutput::ok(format!("{stale}No {what} found for \"{symbol}\"{filter_note}"));
         }
         let cut =
             if rows.len() > limit { format!("\n\n> Showing {limit} of {} {what}; pass `limit` (up to 100) to widen.", rows.len()) } else { String::new() };
         let mut lines = vec![format!("**{title} {symbol} ({} found)**", rows.len().min(limit)), String::new()];
         lines.extend(rows.into_iter().take(limit));
-        return ToolOutput::ok(truncate_output(lines.join("\n") + &cut + &filter_note));
+        return ToolOutput::ok(truncate_output(stale + &lines.join("\n") + &cut + &filter_note));
     }
+    let mut touched: Vec<FileId> = Vec::new();
     let mut lines = vec![format!("**{title} {symbol} — {} distinct definitions (narrow with `file`)**", groups.len())];
     for grp in &groups {
         let head = grp[0];
         lines.push(String::new());
         lines.push(format!("**{}** ({}) — {}:{}", g.qname(head), g.kind(head), g.node_path(head), g.line(head)));
-        let rows = collect(grp);
+        let (rows, files) = collect(grp);
+        touched.extend(files);
         if rows.is_empty() {
             lines.push(format!("- (no {what})"));
             continue;
@@ -274,7 +304,8 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
             lines.push(format!("- … +{} more (pass `limit` to widen)", total - limit));
         }
     }
-    ToolOutput::ok(truncate_output(lines.join("\n") + &filter_note))
+    let stale = stale_banner_for_files(g, touched);
+    ToolOutput::ok(truncate_output(stale + &lines.join("\n") + &filter_note))
 }
 
 fn format_impact(g: &Graph, label: &str, root: NodeIdx, imp: &crate::traverse::Impact) -> String {
@@ -323,16 +354,21 @@ fn handle_impact(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
     if groups.len() == 1 {
         let root = groups[0][0];
         let imp = g.impact(root, depth, 5_000);
-        return ToolOutput::ok(truncate_output(format_impact(g, symbol, root, &imp) + &filter_note));
+        let stale = stale_banner_for_files(g, std::iter::once(g.view.hot(root).file).chain(imp.nodes.iter().map(|(n, _)| g.view.hot(*n).file)));
+        return ToolOutput::ok(truncate_output(stale + &format_impact(g, symbol, root, &imp) + &filter_note));
     }
+    let mut touched: Vec<FileId> = Vec::new();
     let mut lines = vec![format!("**Impact of {symbol} — {} distinct definitions (each with its own blast radius; narrow with `file`)**", groups.len())];
     for grp in groups.iter().take(12) {
         let root = grp[0];
         let imp = g.impact(root, depth, 5_000);
+        touched.push(g.view.hot(root).file);
+        touched.extend(imp.nodes.iter().map(|(n, _)| g.view.hot(*n).file));
         lines.push(String::new());
         lines.push(format_impact(g, &format!("{} ({}:{})", g.qname(root), g.node_path(root), g.line(root)), root, &imp));
     }
-    ToolOutput::ok(truncate_output(lines.join("\n") + &filter_note))
+    let stale = stale_banner_for_files(g, touched);
+    ToolOutput::ok(truncate_output(stale + &lines.join("\n") + &filter_note))
 }
 
 /// Safety checks for a path argument (design doc 8.4, 10.4): inside the project only, no
@@ -558,8 +594,7 @@ fn file_view(g: &Graph, file_arg: &str, mut opts: FileViewOpts) -> ToolOutput {
     let mut nodes: Vec<NodeIdx> =
         g.view.nodes_in_file(f).map(NodeIdx).filter(|n| !matches!(g.kind(*n), NodeKind::File | NodeKind::Import | NodeKind::Export)).collect();
     nodes.sort_by_key(|n| g.line(*n));
-    let graph = g.file_graph();
-    let dependents: Vec<FileId> = graph.rev.get(f.idx()).map(|v| v.iter().map(|x| FileId(*x)).collect()).unwrap_or_default();
+    let dependents: Vec<FileId> = g.file_dependents(f, true);
     let dep_summary = if dependents.is_empty() {
         "no other indexed file depends on it".to_owned()
     } else {
@@ -644,12 +679,97 @@ fn file_view(g: &Graph, file_arg: &str, mut opts: FileViewOpts) -> ToolOutput {
     ToolOutput::ok(out.join("\n"))
 }
 
+fn read_manifest_pkg_name(dir: &std::path::Path) -> Option<Option<String>> {
+    for json_file in ["package.json", "composer.json"] {
+        let p = dir.join(json_file);
+        if p.is_file() {
+            let name = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned));
+            return Some(name);
+        }
+    }
+    for (toml_file, section) in [("Cargo.toml", "[package]"), ("pyproject.toml", "[project]")] {
+        let p = dir.join(toml_file);
+        if p.is_file() {
+            let name = std::fs::read_to_string(&p).ok().and_then(|s| {
+                let mut in_sec = false;
+                for raw in s.lines() {
+                    let line = raw.trim();
+                    if line.starts_with('[') {
+                        in_sec = line == section;
+                        continue;
+                    }
+                    if in_sec {
+                        if let Some((k, v)) = line.split_once('=') {
+                            if k.trim() == "name" {
+                                let val = v.trim().trim_matches('"').trim_matches('\'').trim();
+                                if !val.is_empty() {
+                                    return Some(val.to_owned());
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            });
+            return Some(name);
+        }
+    }
+    let gomod = dir.join("go.mod");
+    if gomod.is_file() {
+        let name = std::fs::read_to_string(&gomod).ok().and_then(|s| {
+            s.lines().map(str::trim).find_map(|l| l.strip_prefix("module ").map(|m| m.trim().trim_matches('"').to_owned()).filter(|m| !m.is_empty()))
+        });
+        return Some(name);
+    }
+    for build_file in ["pom.xml", "build.gradle", "build.gradle.kts"] {
+        if dir.join(build_file).is_file() {
+            return Some(None);
+        }
+    }
+    None
+}
+
+fn package_label_for_file(g: &Graph, rel: &str, cache: &mut FxHashMap<String, Option<String>>) -> String {
+    let mut cur = match rel.rsplit_once('/') {
+        Some((head, _)) => head,
+        None => "",
+    };
+    loop {
+        if !cache.contains_key(cur) {
+            let label = g.abs_path(cur).and_then(|abs| read_manifest_pkg_name(&abs)).map(|maybe_name| {
+                let dir_disp = if cur.is_empty() { "." } else { cur };
+                match maybe_name {
+                    Some(n) if cur.is_empty() => format!("{n} (.)"),
+                    Some(n) => format!("{n} ({dir_disp})"),
+                    None => dir_disp.to_owned(),
+                }
+            });
+            cache.insert(cur.to_owned(), label);
+        }
+        if let Some(Some(label)) = cache.get(cur) {
+            return label.clone();
+        }
+        if cur.is_empty() {
+            return ".".to_owned();
+        }
+        cur = match cur.rsplit_once('/') {
+            Some((head, _)) => head,
+            None => "",
+        };
+    }
+}
+
 fn handle_files(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
     let g = env.graph;
     let dir = str_arg(args, "path").map(|p| p.replace('\\', "/").trim_matches('/').to_owned());
     let pattern = str_arg(args, "pattern");
     let format = str_arg(args, "format").unwrap_or("tree");
     let meta = args.get("includeMetadata").and_then(|v| v.as_bool()).unwrap_or(true);
+    let tests_only = args.get("testsOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+    let exclude_tests = args.get("excludeTests").and_then(|v| v.as_bool()).unwrap_or(false);
     let max_depth = num_arg(args, "maxDepth").map(|n| n as usize);
     let glob = pattern.and_then(|p| {
         let p = if p.contains('/') { p.to_owned() } else { format!("**/{p}") };
@@ -660,6 +780,7 @@ fn handle_files(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
         .files()
         .filter(|f| dir.as_ref().is_none_or(|d| g.path(*f) == d || g.path(*f).starts_with(&format!("{d}/"))))
         .filter(|f| glob.as_ref().is_none_or(|m| m.is_match(g.path(*f))))
+        .filter(|f| (!tests_only || g.is_test_file(*f)) && (!exclude_tests || !g.is_test_file(*f)))
         .collect();
     files.sort_by(|a, b| g.path(*a).cmp(g.path(*b)));
     if files.is_empty() {
@@ -708,17 +829,10 @@ fn handle_files(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
         }
         "package" => {
             let mut by_pkg: std::collections::BTreeMap<String, Vec<FileId>> = std::collections::BTreeMap::new();
+            let mut cache: FxHashMap<String, Option<String>> = FxHashMap::default();
             for f in &files {
-                let mut p = g.path(*f).to_owned();
-                let mut found = String::from(".");
-                while let Some((head, _)) = p.rsplit_once('/') {
-                    if g.view.file_by_path(&format!("{head}/package.json")).is_some() || g.view.file_by_path(&format!("{head}/composer.json")).is_some() {
-                        found = head.to_owned();
-                        break;
-                    }
-                    p = head.to_owned();
-                }
-                by_pkg.entry(found).or_default().push(*f);
+                let pkg = package_label_for_file(g, g.path(*f), &mut cache);
+                by_pkg.entry(pkg).or_default().push(*f);
             }
             for (pkg, fs) in by_pkg {
                 lines.push(format!("**{pkg} ({})**", fs.len()));

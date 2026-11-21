@@ -43,6 +43,11 @@ impl SourceView {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// 1-based line accessor.
+    pub fn line(&self, n: u32) -> Option<&str> {
+        let idx = n.checked_sub(1)? as usize;
+        (idx < self.len()).then(|| &self[idx])
+    }
 }
 
 impl Index<usize> for SourceView {
