@@ -323,6 +323,8 @@ with watching enabled, it performs that synchronization automatically after a de
 |---|---|
 | TypeScript / TSX | `.ts`, `.mts`, `.cts`, `.tsx` |
 | JavaScript / JSX | `.js`, `.mjs`, `.cjs`, `.jsx`, `.xsjs`, `.xsjslib` |
+| Vue SFC | `.vue` |
+| Svelte SFC | `.svelte` |
 | Python | `.py`, `.pyw` |
 | Go | `.go` |
 | Java | `.java` |
@@ -350,7 +352,7 @@ an older index refreshes its facts and call edges.
 ### Framework and dynamic-dispatch rules
 
 Route hooks are implemented for **Express, Flask, FastAPI, Django, Gin, Spring, Axum, Next.js,
-NestJS, React Router and TanStack Router**.
+Nuxt, SvelteKit, NestJS, React Router and TanStack Router**.
 Framework detection uses project manifests, so route coverage can differ when dependencies are
 absent or when indexing a framework's own repository. The benchmark documents observed gaps.
 
@@ -393,9 +395,34 @@ that link nothing when a name is ambiguous:
   frontend's `invoke('cmd')` reaches the registered `#[tauri::command]`; React Native
   `NativeModules.X.m()` reaches the Java / Kotlin module's `@ReactMethod`.
 
-Not covered: MyBatis XML, Angular templates, Vue / Svelte ecosystem stores and routers, React Native
-events and the Fabric / Expo native side, Tauri events, GoFrame, and Python parameter-type flow
-(upstream implements it for Ruby only).
+Engine rule version 14 adds Vue/Svelte SFC extraction and deepens static inference for Rust,
+Kotlin and Python:
+
+- **Vue / Svelte SFC**: `.vue` and `.svelte` files extract `<script>`/`<script setup>`/`<script module>`
+  blocks with exact source line/column mapping (reusing the existing TS/TSX/JS/JSX parsers without
+  new C grammars), Vue Options API members, template component tags and call expressions, Svelte
+  `$store` reactive references, `@/` / `~/` / `$lib/` aliases (honoring `tsconfig.json` `paths` first),
+  Vue 3 macros, Nuxt auto-imports and virtual modules (`#imports`, `#app`, ...), Svelte 5 runes
+  (including `.svelte.ts`/`.svelte.js`), and Nuxt/SvelteKit file-based routes.
+- **Rust**: `pin_project!` wrapper masking, tuple struct fields, `TypeParam::method` and call-site
+  generic bound substitution, project-defined `Mutex`/`RwLock` guards, return-type-verified generic
+  `Deref` wrappers, transparent `.project()`/`.as_mut()`/`.as_ref()`/`.clone()`, method-call tuple
+  destructuring, sibling inline `mod` scoping, and receiver-verified blanket extension traits.
+- **Kotlin / JVM**: callable-over-field disambiguation for builder APIs, pre-order chained call
+  resolution, expression-body returns (`= apply { ... }`, `= this`, `= object : T() {}`), getter
+  properties, chained field access on call results (`execute().body.string()`), scope-function
+  lambdas (`.use`/`.let`/`.also`/`.apply`/`.run`/`with`), DSL receiver lambdas
+  (`Receiver.() -> Unit`), and receiver-narrowed extension imports.
+- **Python**: default-parameter values and imported singleton aliases, transparent stdlib decorator
+  return inference (`@property`, `@cached_property`, `@classmethod`, `@lru_cache`, ...), general
+  decorator-injected `self.<attr>` fields, subscript indexing (`__getitem__`), and Django runtime
+  proxies (`connection`, `cache`, `connections[...]`, `caches[...]`, `schema_editor()`, `cursor()`,
+  and implicit `Model.objects` -> `QuerySet`).
+
+Not covered: MyBatis XML, Angular templates, Pinia/Vuex store internals, Vue Router / dynamic
+programmatic Nuxt/SvelteKit route tables, React Native events and the Fabric / Expo native side,
+Tauri events, GoFrame, and general call-site-driven Python parameter-type flow (upstream implements
+it for Ruby only).
 
 C/C++, C#, PHP, Ruby and Swift use the upstream extraction walkers with this project's own
 resolution rules (includes, namespaces, `require`, SwiftPM modules, implicit `this` members).
@@ -403,7 +430,6 @@ Against upstream `d2e0389` on strict edge keys, cJSON, MediatR, Slim and Sinatra
 97% / 95% gate; fmt (94.1% / 92.8%) and Alamofire (96.5% / 93.8%) do not; much of the gap is
 call sites where the two pick different overloads or scopes (see [docs/LANGUAGES-P5.md](docs/LANGUAGES-P5.md)). These
 languages have no framework route rules yet. Dart, Scala, Lua, Luau and R are detected but not extracted.
-Vue/Svelte-specific extraction is also outside the current scope.
 
 ## Command-line reference
 

@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+### Vue/Svelte SFC support and deep Rust/Kotlin/Python inference (`ENGINE_VERSION = 14`)
+
+- **Vue (`.vue`) and Svelte (`.svelte`) Single-File Component support** (zero new Tree-sitter C
+  grammars; reuses existing TS/TSX/JS/JSX parsers):
+  - `cg-extract/src/sfc.rs`: emit a `Component` node per SFC, fold `<script>`, `<script setup>`,
+    and `<script module>` blocks with exact 1-based line and UTF-16 column preservation (skipping
+    raw-text `<script>`/`<style>` bodies when masking HTML comments), extract Vue Options API
+    `methods`/`computed`/`watch`/lifecycle hooks, template component tags (`PascalCase` and
+    `kebab-case`), interpolations, directives, bare handlers, and Svelte `$store` reactive refs.
+  - `cg-resolve`: add `@/` / `~/` / `$lib/` path aliases (after explicit `tsconfig.json` `paths`),
+    Nuxt (`#imports`, `#components`, `#app`, `#build`, `#head`) and SvelteKit (`$app/*`, `$env/*`)
+    virtual modules, Vue 3 compiler macros, Nuxt auto-imports, Svelte 5 runes (including
+    `.svelte.ts` / `.svelte.js`), and Nuxt/SvelteKit file-based route hooks.
+  - `cg-sync` & `cg-query`: invalidate Svelte `$store` consumers on store edits, and recognize
+    `.vue` / `.svelte` in file-path explore queries, `cgr version --verbose`, and MCP instructions.
+- **Deepened Rust / Kotlin / Python semantic inference**:
+  - **Rust**: mask `pin_project!` / `pin_project_lite::pin_project!` wrappers alongside `cfg_*!`;
+    infer tuple struct fields, `TypeParam` trait bounds and `TypeParam::method` (`U::initialize`),
+    `array_type` elements, hoisted `static`/`const` bindings, `reference_expression`,
+    `if let` conditions, `self` / `mut self: Pin<&mut Self>` receivers, `::pin` constructors,
+    transparent `.clone()`/`.as_mut()`/`.as_ref()`/`.project()`/`.as_pin_mut()`/`.as_pin_ref()`,
+    project-defined `Mutex`/`RwLock` guards and re-exported `Arc`, return-type-verified generic
+    `Deref` wrappers, method-call tuple destructuring, sibling inline `mod` scoping (`use super::`
+    and line-span disambiguation), and receiver-verified blanket extension traits.
+  - **Kotlin / JVM**: prefer callables/types over same-named fields/properties in `direct_member`
+    (builder property/method shadowing), preserve AST pre-order for chained same-name calls at one
+    `(line, col)`, infer expression-body returns (`= apply { ... }`, `= also { ... }`, `= this`,
+    `= object : T() {}`), getter-only properties, `as` casts, `object` literals, companion-object
+    enclosing-class scope, chained field access on call results (`execute().body.string()`),
+    scope-function lambdas (`.use`/`.let`/`.also`/`.apply`/`.run`/`with`), general Kotlin DSL
+    receiver lambdas (`block: Receiver.() -> Unit`), companion/top-level extension imports with
+    deterministic path/line/col tie-breaking, and receiver-type-narrowed extension resolution.
+  - **Python**: infer default-parameter values and imported singleton aliases, enable return-type
+    inference through transparent stdlib decorators (`@property`, `@cached_property`, `@classmethod`,
+    `@staticmethod`, `@lru_cache`, `@cache`, `@override`, `@abstractmethod`, `@async_unsafe`) while
+    preserving `self` subclass types, handle `return self`/`cls(...)`/typed locals/`with` blocks,
+    resolve general decorator-injected `self.<attr>` fields, resolve subscript indexing (`__getitem__`),
+    and model Django runtime proxies (`connection`, `cache`, `connections[...]`, `caches[...]`,
+    `schema_editor()`, `cursor()`, and implicit `Model.objects` -> `QuerySet`).
+- **Incremental sync parity (`cg-sync`)**:
+  - Track file-scope `BindKind::Local` across Go/Rust/Python/Kotlin, Rust `BindKind::TypeParam`,
+    and blanket `BindKind::TraitImpl` in `resolver_fact_sig`; invalidate consumers when exported
+    inference providers swap imports, when wildcard imports or `qname` owner members change, and
+    for Python subscript receiver expressions.
+
 ### Upstream v1.6.4 kernel, multi-language precision/recall, and query parity
 
 - **Re-vendor upstream v1.6.4 (`461a5d8`)** in `crates/cg-kernel` (preserving all 4 reproducible

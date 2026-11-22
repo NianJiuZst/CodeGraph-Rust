@@ -288,6 +288,8 @@ MCP 服务运行且启用监听时，会在防抖后自动同步源码变化。
 |---|---|
 | TypeScript / TSX | `.ts`、`.mts`、`.cts`、`.tsx` |
 | JavaScript / JSX | `.js`、`.mjs`、`.cjs`、`.jsx`、`.xsjs`、`.xsjslib` |
+| Vue SFC | `.vue` |
+| Svelte SFC | `.svelte` |
 | Python | `.py`、`.pyw` |
 | Go | `.go` |
 | Java | `.java` |
@@ -310,7 +312,7 @@ TypeScript/TSX 工厂调用支持传播函数声明、变量初始化的箭头/�
 
 ### 框架与动态分派规则
 
-已实现 **Express、Flask、FastAPI、Django、Gin、Spring、Axum、Next.js、NestJS、React Router 和 TanStack Router** 的路由提取 hook。
+已实现 **Express、Flask、FastAPI、Django、Gin、Spring、Axum、Next.js、Nuxt、SvelteKit、NestJS、React Router 和 TanStack Router** 的路由提取 hook。
 框架检测依赖项目清单，因此缺失依赖声明或索引框架自身仓库时，路由覆盖可能不同；实测文档记录了已观察到的差异。
 
 合成边规则覆盖接口与实现分派、Go 结构化接口、事件发射器处理函数、React 重新渲染、JSX 父子组件关系等模式。
@@ -341,10 +343,28 @@ Go 接口分派包含无歧义的提升方法；方法集推断仍是有界的�
   Kotlin Multiplatform `expect` 连到各平台 `actual`；Tauri 前端 `invoke('cmd')` 连到已注册的 `#[tauri::command]`；
   React Native `NativeModules.X.m()` 连到 Java / Kotlin 模块的 `@ReactMethod`。
 
-尚未覆盖：MyBatis XML、Angular 模板、Vue / Svelte 生态的 store 与路由、React Native 事件与 Fabric/Expo 原生侧、
-Tauri 事件、GoFrame，以及 Python 参数类型流（上游仅对 Ruby 实现）。
+引擎规则版本 14 新增 Vue / Svelte 单文件组件（SFC）提取，并深化了 Rust、Kotlin 和 Python 的静态类型推导：
 
-C/C++、C#、PHP、Ruby、Swift 使用上游的提取 walker，并配有本项目自己的解析规则（头文件包含、命名空间、`require`、SwiftPM 模块、隐式 `this` 成员）；其解析质量只在样例仓库上做过检查，尚未与上游 oracle 对比，也还没有框架路由规则。Dart、Scala、Lua、Luau、R 只做语言识别，不做提取。当前也不包含 Vue/Svelte 专用提取逻辑。
+- **Vue / Svelte SFC**：`.vue` 与 `.svelte` 直接复用既有 TS/TSX/JS/JSX 解析器（不新增任何 C 语法包），
+  精确保留 `<script>` / `<script setup>` / `<script module>` 的行列坐标，提取 Vue Options API 成员、
+  模板组件标签与调用表达式、Svelte `$store` 响应式引用，支持 `@/`、`~/`、`$lib/` 路径别名
+  （优先遵循 `tsconfig.json` 的 `paths`）、Vue 3 编译宏、Nuxt 自动导入与虚拟模块（`#imports`、`#app` 等）、
+  Svelte 5 runes（含 `.svelte.ts` / `.svelte.js`），以及 Nuxt / SvelteKit 文件系统路由。
+- **Rust**：`pin_project!` 宏包装遮蔽、元组结构体字段、`TypeParam::method` 与调用点泛型约束替换、
+  项目自定义 `Mutex` / `RwLock` 锁 guard、按返回类型校验的泛型 `Deref` 包装、`.project()`/`.as_mut()`/`.as_ref()`/`.clone()` 透传、
+  方法调用元组解构、同文件多内联 `mod` 作用域隔离，以及校验接收者满足条件的 blanket 扩展 trait 解析。
+- **Kotlin / JVM**：Builder 模式下同名方法优先于字段、同位置链式同名调用的 AST 先序保留、
+  表达式体返回推导（`= apply { ... }`、`= this`、`= object : T() {}`）、getter 属性、
+  调用结果上的链式字段访问（`execute().body.string()`）、作用域函数 lambda（`.use`/`.let`/`.also`/`.apply`/`.run`/`with`）、
+  Kotlin DSL 接收者 lambda（`Receiver.() -> Unit`），以及按接收者类型收敛的扩展函数导入。
+- **Python**：默认参数值与导入单例别名推导、透明标准装饰器返回类型传播（`@property`、`@cached_property`、`@classmethod`、`@lru_cache` 等）、
+  通用装饰器注入的 `self.<attr>` 动态属性、下标索引（`__getitem__`），以及 Django 运行时代理
+  （`connection`、`cache`、`connections[...]`、`caches[...]`、`schema_editor()`、`cursor()` 和隐式 `Model.objects` -> `QuerySet`）。
+
+尚未覆盖：MyBatis XML、Angular 模板、Pinia / Vuex 内部 store 细节、Vue Router 与编程式 Nuxt/SvelteKit 动态路由表、
+React Native 事件与 Fabric/Expo 原生侧、Tauri 事件、GoFrame，以及通用按调用点反向传播的 Python 参数类型流（上游仅对 Ruby 实现）。
+
+C/C++、C#、PHP、Ruby、Swift 使用上游的提取 walker，并配有本项目自己的解析规则（头文件包含、命名空间、`require`、SwiftPM 模块、隐式 `this` 成员）；其解析质量只在样例仓库上做过检查，尚未与上游 oracle 对比，也还没有框架路由规则。Dart、Scala、Lua、Luau、R 只做语言识别，不做提取。
 
 ## 命令行参考
 
