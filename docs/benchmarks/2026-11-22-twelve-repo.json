@@ -1,0 +1,4383 @@
+{
+  "date": "2026-11-22",
+  "cgr": {
+    "version": "cgr 0.2.0",
+    "commit": "bf986bd674e6e27a4cd9cddd2ba102fca79329ed",
+    "build": "cargo build --release --locked -p cgr (fat LTO, codegen-units = 1, opt-level = 3)",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "binarySha256": "f9f04fa59c10bd44b891e65055726878706490f6a42ea6a755d5e1abc7612e6e",
+    "sourceNote": "Built from bf986bd with Cargo.toml version bumped to 0.2.0; engine source is identical to tag v0.2.0."
+  },
+  "upstream": {
+    "repository": "colbymchenry/codegraph",
+    "version": "1.6.4",
+    "commit": "461a5d87a873a4932997cd9a49042ab30e45a675",
+    "node": "v26.13.1",
+    "launch": "CODEGRAPH_ALLOW_UNSAFE_NODE=1 node --liftoff-only --disable-warning=ExperimentalWarning",
+    "nativeKernel": "darwin-arm64 prebuild (verified loaded via getKernel())"
+  },
+  "machine": {
+    "cpu": "Apple M5 (10 cores)",
+    "os": "macOS 26.6 (Build 25G72), arm64",
+    "memoryGiB": 32
+  },
+  "environment": {
+    "CGR_THREADS": "2",
+    "CGR_MEMORY_MB": "2048",
+    "CODEGRAPH_PARSE_WORKERS": "2",
+    "CODEGRAPH_RESOLVE_WORKERS": "2",
+    "telemetry": "off"
+  },
+  "method": {
+    "fullIndex": "1 untimed warmup + 3 timed CLI rebuilds per side in alternating order; wall time via monotonic clock, peak RSS via /usr/bin/time -l",
+    "fullIndexAuto": "Separate 1 warmup + 3 timed cgr index runs with CGR_THREADS unset (auto on 10 cores)",
+    "sync": "3 timed sync commands per category (noop, comment edit, alternating single-file rename) and side in alternating order; original bytes restored and synced after each category with full graph-restoration, status --verify --strict, and debug diff verification",
+    "warmQuery": "8 warm-up queries, then 20 fixed queries x 3 passes in-process (60 observations); nearest-rank percentiles",
+    "cliQuery": "New-process CLI explore of the first query, 3 runs per side in alternating order",
+    "graphKey": "(source natural key, target natural key, kind, line, UTF-16 column) where natural key = (file_path, kind, name, start_line, start_col); precision = shared/cgr, recall = shared/upstream",
+    "answerSize": "upstream outputChars are UTF-16 code units, cgr outputChars are UTF-8 bytes"
+  },
+  "repositories": {
+    "express": {
+      "name": "Express",
+      "language": "JavaScript",
+      "repository": "expressjs/express",
+      "commit": "1c6f1b0fe4000977b9a7b4f34097e4d527dd9824",
+      "files": 142,
+      "excludedOnBothSides": 7,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "b6a5d80e5fd5bfaa06111b889b34fe1f1717b94be83096f564ee2a98a568a0e3",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            659.171209,
+            667.837917,
+            674.4028750000002
+          ],
+          "medianMs": 667.837917,
+          "medianPeakRssMiB": 217.046875
+        },
+        "cgr": {
+          "samplesMs": [
+            111.42254199999991,
+            105.6064160000001,
+            105.4259580000001
+          ],
+          "medianMs": 105.6064160000001,
+          "medianPeakRssMiB": 50.234375
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            69.28333299999956,
+            67.51416600000049,
+            66.8045829999997
+          ],
+          "medianMs": 67.51416600000049,
+          "medianPeakRssMiB": 66.1875
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 3315,
+          "oracle": 2341,
+          "intersection": 2159,
+          "cgrOnly": 1156,
+          "oracleOnly": 182,
+          "precision": 0.6512820512820513,
+          "recall": 0.9222554463904314,
+          "f1": 0.7634370579915135,
+          "jaccard": 0.617386331140978
+        },
+        "calls": {
+          "cgr": 1954,
+          "oracle": 1278,
+          "intersection": 1117,
+          "cgrOnly": 837,
+          "oracleOnly": 161,
+          "precision": 0.5716479017400204,
+          "recall": 0.8740219092331768,
+          "f1": 0.6912128712871287,
+          "jaccard": 0.5281323877068558,
+          "pStar": 1.0,
+          "siteMatch": 0.8740219092331768,
+          "diffTarget": 0,
+          "extraSites": 837,
+          "missedSites": 161
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 1954,
+            "oracle": 1278,
+            "intersection": 1117,
+            "cgrOnly": 837,
+            "oracleOnly": 161,
+            "precision": 0.5716479017400204,
+            "recall": 0.8740219092331768,
+            "f1": 0.6912128712871287,
+            "jaccard": 0.5281323877068558
+          },
+          "contains": {
+            "cgr": 1012,
+            "oracle": 733,
+            "intersection": 733,
+            "cgrOnly": 279,
+            "oracleOnly": 0,
+            "precision": 0.724308300395257,
+            "recall": 1.0,
+            "f1": 0.8401146131805158,
+            "jaccard": 0.724308300395257
+          },
+          "imports": {
+            "cgr": 151,
+            "oracle": 154,
+            "intersection": 151,
+            "cgrOnly": 0,
+            "oracleOnly": 3,
+            "precision": 1.0,
+            "recall": 0.9805194805194806,
+            "f1": 0.9901639344262295,
+            "jaccard": 0.9805194805194806
+          },
+          "instantiates": {
+            "cgr": 84,
+            "oracle": 84,
+            "intersection": 83,
+            "cgrOnly": 1,
+            "oracleOnly": 1,
+            "precision": 0.9880952380952381,
+            "recall": 0.9880952380952381,
+            "f1": 0.9880952380952381,
+            "jaccard": 0.9764705882352941
+          },
+          "references": {
+            "cgr": 114,
+            "oracle": 92,
+            "intersection": 75,
+            "cgrOnly": 39,
+            "oracleOnly": 17,
+            "precision": 0.6578947368421053,
+            "recall": 0.8152173913043478,
+            "f1": 0.7281553398058253,
+            "jaccard": 0.5725190839694656
+          }
+        },
+        "gatePassed": false
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 142,
+          "nodeRows": 1152,
+          "uniqueNaturalNodes": 1152,
+          "routeNodes": 277,
+          "edgeRows": 2341,
+          "uniqueEdges": 2341,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 142,
+          "nodeRows": 1154,
+          "uniqueNaturalNodes": 1154,
+          "routeNodes": 279,
+          "edgeRows": 3315,
+          "uniqueEdges": 3315,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "lib/application.js",
+        "renamedSymbol": "handle",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 23 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; 4 file(s) re-resolved in 24 ms",
+          "renameOccurrences": 5,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "defaultConfiguration",
+        "disabled range",
+        "how does range work with compileTrust",
+        "compileTrust",
+        "compileETag attachment",
+        "how does attachment work with onfile",
+        "onfile",
+        "tryRender enabled",
+        "how does enabled work with handle",
+        "handle",
+        "contentType createApplication",
+        "how does createApplication work with jsonp",
+        "jsonp",
+        "normalizeTypes renderTick",
+        "how does renderTick work with logerror",
+        "logerror",
+        "status send",
+        "how does send work with onend",
+        "onend",
+        "View defaultConfiguration"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              192.63483400000015,
+              199.13920800000005,
+              198.8041250000001
+            ],
+            "medianMs": 198.8041250000001,
+            "medianPeakRssMiB": 93.203125
+          },
+          "cgr": {
+            "samplesMs": [
+              13.511084000000118,
+              13.030082999999859,
+              13.27266699999985
+            ],
+            "medianMs": 13.27266699999985,
+            "medianPeakRssMiB": 12.5
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              386.83012500000035,
+              389.67095900000004,
+              381.083125
+            ],
+            "medianMs": 386.83012500000035,
+            "medianPeakRssMiB": 146.8125
+          },
+          "cgr": {
+            "samplesMs": [
+              29.986791999999873,
+              29.48549999999983,
+              29.05937500000011
+            ],
+            "medianMs": 29.48549999999983,
+            "medianPeakRssMiB": 34.5
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              393.28420799999986,
+              393.7110000000006,
+              389.1006670000001
+            ],
+            "medianMs": 393.28420799999986,
+            "medianPeakRssMiB": 146.71875
+          },
+          "cgr": {
+            "samplesMs": [
+              30.564582999999423,
+              15.62370799999968,
+              30.998042000000225
+            ],
+            "medianMs": 30.564582999999423,
+            "medianPeakRssMiB": 35.28125
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              113.20441600000031,
+              108.29670799999924,
+              106.41608299999916
+            ],
+            "medianMs": 108.29670799999924,
+            "medianPeakRssMiB": 66.921875
+          },
+          "cgr": {
+            "samplesMs": [
+              5.93312499999854,
+              6.315292000000028,
+              6.446625000000594
+            ],
+            "medianMs": 6.315292000000028,
+            "medianPeakRssMiB": 8.734375
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              521.1981660000005
+            ],
+            "medianMs": 521.1981660000005,
+            "medianPeakRssMiB": 218.46875,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 0.304209,
+                "p50": 5.577042,
+                "p95": 11.88375,
+                "p99": 12.944459,
+                "max": 12.944459,
+                "mean": 4.71014865
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 366,
+                "p50": 11776,
+                "p95": 15252,
+                "p99": 15829,
+                "max": 15829,
+                "mean": 9106.35
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              11.94929200000061
+            ],
+            "medianMs": 11.94929200000061,
+            "medianPeakRssMiB": 9.625,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 0.321875,
+                "mean": 0.07688613333333334,
+                "min": 0.016875,
+                "n": 60,
+                "p50": 0.076459,
+                "p95": 0.15937500000000002,
+                "p99": 0.321875
+              },
+              "outputChars": {
+                "max": 12880.0,
+                "mean": 4642.5,
+                "min": 302.0,
+                "n": 20,
+                "p50": 4838.0,
+                "p95": 9068.0,
+                "p99": 12880.0
+              },
+              "queries": 20,
+              "root": "corpus/express",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 0.321875,
+                  "query": "contentType createApplication"
+                },
+                {
+                  "ms": 0.256209,
+                  "query": "how does createApplication work with jsonp"
+                },
+                {
+                  "ms": 0.188834,
+                  "query": "how does renderTick work with logerror"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "gin": {
+      "name": "Gin",
+      "language": "Go",
+      "repository": "gin-gonic/gin",
+      "commit": "0f09c3a9b4626d9fe9979cf4d0521d6ae32ab646",
+      "files": 99,
+      "excludedOnBothSides": 11,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "89a7223a6cfd1716fb7e55438f64bdf571249706be772e355c4ca5216a3f66e6",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            686.8254999999995,
+            678.7367919999987,
+            676.4072080000005
+          ],
+          "medianMs": 678.7367919999987,
+          "medianPeakRssMiB": 230.25
+        },
+        "cgr": {
+          "samplesMs": [
+            91.30629200000051,
+            93.67566599999932,
+            88.85866699999845
+          ],
+          "medianMs": 91.30629200000051,
+          "medianPeakRssMiB": 37.9375
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            69.78395899999867,
+            59.31179200000258,
+            60.198834000001256
+          ],
+          "medianMs": 60.198834000001256,
+          "medianPeakRssMiB": 48.828125
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 8417,
+          "oracle": 8073,
+          "intersection": 7859,
+          "cgrOnly": 558,
+          "oracleOnly": 214,
+          "precision": 0.9337055958179874,
+          "recall": 0.9734918865353648,
+          "f1": 0.9531837477258944,
+          "jaccard": 0.9105549762484069
+        },
+        "calls": {
+          "cgr": 3681,
+          "oracle": 3807,
+          "intersection": 3649,
+          "cgrOnly": 32,
+          "oracleOnly": 158,
+          "precision": 0.991306710133116,
+          "recall": 0.9584975045967954,
+          "f1": 0.9746260683760684,
+          "jaccard": 0.9505079447772857,
+          "pStar": 0.9969945355191256,
+          "siteMatch": 0.974571586511885,
+          "diffTarget": 11,
+          "extraSites": 21,
+          "missedSites": 92
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 3681,
+            "oracle": 3807,
+            "intersection": 3649,
+            "cgrOnly": 32,
+            "oracleOnly": 158,
+            "precision": 0.991306710133116,
+            "recall": 0.9584975045967954,
+            "f1": 0.9746260683760684,
+            "jaccard": 0.9505079447772857
+          },
+          "contains": {
+            "cgr": 2972,
+            "oracle": 2767,
+            "intersection": 2731,
+            "cgrOnly": 241,
+            "oracleOnly": 36,
+            "precision": 0.9189098250336474,
+            "recall": 0.9869895193350199,
+            "f1": 0.9517337515246559,
+            "jaccard": 0.9079122340425532
+          },
+          "extends": {
+            "cgr": 13,
+            "oracle": 11,
+            "intersection": 11,
+            "cgrOnly": 2,
+            "oracleOnly": 0,
+            "precision": 0.8461538461538461,
+            "recall": 1.0,
+            "f1": 0.9166666666666666,
+            "jaccard": 0.8461538461538461
+          },
+          "implements": {
+            "cgr": 95,
+            "oracle": 93,
+            "intersection": 92,
+            "cgrOnly": 3,
+            "oracleOnly": 1,
+            "precision": 0.968421052631579,
+            "recall": 0.989247311827957,
+            "f1": 0.9787234042553192,
+            "jaccard": 0.9583333333333334
+          },
+          "imports": {
+            "cgr": 31,
+            "oracle": 0,
+            "intersection": 0,
+            "cgrOnly": 31,
+            "oracleOnly": 0,
+            "precision": 0.0,
+            "recall": 1.0,
+            "f1": 0.0,
+            "jaccard": 0.0
+          },
+          "instantiates": {
+            "cgr": 833,
+            "oracle": 833,
+            "intersection": 833,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "references": {
+            "cgr": 792,
+            "oracle": 562,
+            "intersection": 543,
+            "cgrOnly": 249,
+            "oracleOnly": 19,
+            "precision": 0.6856060606060606,
+            "recall": 0.9661921708185054,
+            "f1": 0.8020679468242246,
+            "jaccard": 0.6695437731196054
+          }
+        },
+        "gatePassed": false
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 99,
+          "nodeRows": 2667,
+          "uniqueNaturalNodes": 2667,
+          "routeNodes": 231,
+          "edgeRows": 8073,
+          "uniqueEdges": 8073,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 99,
+          "nodeRows": 2677,
+          "uniqueNaturalNodes": 2677,
+          "routeNodes": 241,
+          "edgeRows": 8417,
+          "uniqueEdges": 8417,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "gin.go",
+        "renamedSymbol": "Default",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 19 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; 9 file(s) re-resolved in 22 ms",
+          "renameOccurrences": 3,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "rebuild405Handlers",
+        "Decoder Encode",
+        "how does Encode work with Recovery",
+        "Recovery",
+        "ClientIP mapForm",
+        "how does mapForm work with BindXML",
+        "BindXML",
+        "BindingBody handle",
+        "how does handle work with GetType",
+        "GetType",
+        "Instance MsgPack",
+        "how does MsgPack work with Error",
+        "Error",
+        "Flush SetHTMLTemplate",
+        "how does SetHTMLTemplate work with addRoute",
+        "addRoute",
+        "writeContentType xmlBinding",
+        "how does xmlBinding work with Size",
+        "Size",
+        "FileAttachment rebuild405Handlers"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              189.86408399999988,
+              193.85429199999925,
+              190.74600000000075
+            ],
+            "medianMs": 190.74600000000075,
+            "medianPeakRssMiB": 91.234375
+          },
+          "cgr": {
+            "samplesMs": [
+              13.776958000001116,
+              13.315042000000332,
+              12.64175000000023
+            ],
+            "medianMs": 13.315042000000332,
+            "medianPeakRssMiB": 11.59375
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              366.3406249999994,
+              366.27695800000026,
+              356.62845799999945
+            ],
+            "medianMs": 366.27695800000026,
+            "medianPeakRssMiB": 147.9375
+          },
+          "cgr": {
+            "samplesMs": [
+              25.19904200000056,
+              25.146000000001223,
+              24.667333000000013
+            ],
+            "medianMs": 25.146000000001223,
+            "medianPeakRssMiB": 29.0
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              373.3000000000004,
+              371.92229099999884,
+              373.8019999999995
+            ],
+            "medianMs": 373.3000000000004,
+            "medianPeakRssMiB": 148.546875
+          },
+          "cgr": {
+            "samplesMs": [
+              28.810374999999055,
+              18.27991599999912,
+              28.40554200000156
+            ],
+            "medianMs": 28.40554200000156,
+            "medianPeakRssMiB": 30.125
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              115.69266700000114,
+              113.4654580000003,
+              116.5532909999989
+            ],
+            "medianMs": 115.69266700000114,
+            "medianPeakRssMiB": 71.015625
+          },
+          "cgr": {
+            "samplesMs": [
+              6.3709589999980665,
+              5.881875000000036,
+              6.059875000001824
+            ],
+            "medianMs": 6.059875000001824,
+            "medianPeakRssMiB": 9.265625
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              725.6282079999999
+            ],
+            "medianMs": 725.6282079999999,
+            "medianPeakRssMiB": 225.625,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 0.490333,
+                "p50": 9.9205,
+                "p95": 14.505,
+                "p99": 15.187791,
+                "max": 15.187791,
+                "mean": 8.00390415
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 397,
+                "p50": 13257,
+                "p95": 15743,
+                "p99": 16590,
+                "max": 16590,
+                "mean": 9714.65
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              16.402542000001574
+            ],
+            "medianMs": 16.402542000001574,
+            "medianPeakRssMiB": 10.6875,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 0.267875,
+                "mean": 0.14133534999999997,
+                "min": 0.016416,
+                "n": 60,
+                "p50": 0.151792,
+                "p95": 0.248958,
+                "p99": 0.267875
+              },
+              "outputChars": {
+                "max": 17671.0,
+                "mean": 8633.65,
+                "min": 334.0,
+                "n": 20,
+                "p50": 8434.0,
+                "p95": 16903.0,
+                "p99": 17671.0
+              },
+              "queries": 20,
+              "root": "corpus/gin",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 0.267875,
+                  "query": "how does handle work with GetType"
+                },
+                {
+                  "ms": 0.259208,
+                  "query": "how does handle work with GetType"
+                },
+                {
+                  "ms": 0.256875,
+                  "query": "how does MsgPack work with Error"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "tokio": {
+      "name": "Tokio",
+      "language": "Rust",
+      "repository": "tokio-rs/tokio",
+      "commit": "b499257ef62bd631b83a988d371f4330f545670c",
+      "files": 814,
+      "excludedOnBothSides": 11,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "5ac51dbcb71cac2b35cc63d303b36074498a653306eaaf94e51a8e218b27d132",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            3190.078791999998,
+            3123.651208000002,
+            3072.3915420000017
+          ],
+          "medianMs": 3123.651208000002,
+          "medianPeakRssMiB": 654.890625
+        },
+        "cgr": {
+          "samplesMs": [
+            545.900249999999,
+            528.952125,
+            532.7329160000005
+          ],
+          "medianMs": 532.7329160000005,
+          "medianPeakRssMiB": 85.625
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            295.82295800000225,
+            287.5152080000021,
+            287.2190419999967
+          ],
+          "medianMs": 287.5152080000021,
+          "medianPeakRssMiB": 94.046875
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 49603,
+          "oracle": 42124,
+          "intersection": 39554,
+          "cgrOnly": 10049,
+          "oracleOnly": 2570,
+          "precision": 0.797411446888293,
+          "recall": 0.9389896496059253,
+          "f1": 0.8624287287276375,
+          "jaccard": 0.7581316006363444
+        },
+        "calls": {
+          "cgr": 19581,
+          "oracle": 17956,
+          "intersection": 15777,
+          "cgrOnly": 3804,
+          "oracleOnly": 2179,
+          "precision": 0.8057300444308259,
+          "recall": 0.8786478057473824,
+          "f1": 0.8406105975437568,
+          "jaccard": 0.725045955882353,
+          "pStar": 0.9286050618010594,
+          "siteMatch": 0.9145722571290479,
+          "diffTarget": 1213,
+          "extraSites": 2591,
+          "missedSites": 1414
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 19581,
+            "oracle": 17956,
+            "intersection": 15777,
+            "cgrOnly": 3804,
+            "oracleOnly": 2179,
+            "precision": 0.8057300444308259,
+            "recall": 0.8786478057473824,
+            "f1": 0.8406105975437568,
+            "jaccard": 0.725045955882353
+          },
+          "contains": {
+            "cgr": 18924,
+            "oracle": 17053,
+            "intersection": 17053,
+            "cgrOnly": 1871,
+            "oracleOnly": 0,
+            "precision": 0.901130839146058,
+            "recall": 1.0,
+            "f1": 0.9479945520749368,
+            "jaccard": 0.901130839146058
+          },
+          "extends": {
+            "cgr": 6,
+            "oracle": 2,
+            "intersection": 2,
+            "cgrOnly": 4,
+            "oracleOnly": 0,
+            "precision": 0.3333333333333333,
+            "recall": 1.0,
+            "f1": 0.5,
+            "jaccard": 0.3333333333333333
+          },
+          "implements": {
+            "cgr": 194,
+            "oracle": 132,
+            "intersection": 131,
+            "cgrOnly": 63,
+            "oracleOnly": 1,
+            "precision": 0.6752577319587629,
+            "recall": 0.9924242424242424,
+            "f1": 0.803680981595092,
+            "jaccard": 0.6717948717948717
+          },
+          "imports": {
+            "cgr": 3524,
+            "oracle": 2333,
+            "intersection": 2188,
+            "cgrOnly": 1336,
+            "oracleOnly": 145,
+            "precision": 0.6208853575482406,
+            "recall": 0.9378482640377197,
+            "f1": 0.7471401741505891,
+            "jaccard": 0.5963477786862905
+          },
+          "instantiates": {
+            "cgr": 1127,
+            "oracle": 821,
+            "intersection": 780,
+            "cgrOnly": 347,
+            "oracleOnly": 41,
+            "precision": 0.6921029281277729,
+            "recall": 0.9500609013398295,
+            "f1": 0.8008213552361397,
+            "jaccard": 0.6678082191780822
+          },
+          "references": {
+            "cgr": 6247,
+            "oracle": 3827,
+            "intersection": 3623,
+            "cgrOnly": 2624,
+            "oracleOnly": 204,
+            "precision": 0.5799583800224107,
+            "recall": 0.9466945388032402,
+            "f1": 0.719277347627556,
+            "jaccard": 0.5616183537436057
+          }
+        },
+        "gatePassed": false
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 814,
+          "nodeRows": 14460,
+          "uniqueNaturalNodes": 14460,
+          "routeNodes": 0,
+          "edgeRows": 42124,
+          "uniqueEdges": 42124,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 814,
+          "nodeRows": 15289,
+          "uniqueNaturalNodes": 15289,
+          "routeNodes": 0,
+          "edgeRows": 49603,
+          "uniqueEdges": 49603,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "tokio/src/runtime/builder.rs",
+        "renamedSymbol": "new_current_thread",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 35 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; 106 file(s) re-resolved in 48 ms",
+          "renameOccurrences": 19,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "StreamReader",
+        "acquire remove_key",
+        "how does remove_key work with OwnedMutexGuardInner",
+        "OwnedMutexGuardInner",
+        "LinesCodec MappedMutexGuardInner",
+        "how does MappedMutexGuardInner work with from_trace",
+        "from_trace",
+        "kill_on_drop open_inner",
+        "how does open_inner work with as_std_mut",
+        "as_std_mut",
+        "build_current_thread_local_runtime stdio",
+        "how does stdio work with try_read_vectored",
+        "try_read_vectored",
+        "blocking_recv AccessError",
+        "how does AccessError work with poll_recv_ready",
+        "poll_recv_ready",
+        "Empty try_transmute",
+        "how does try_transmute work with register_panics_on_invalid_input",
+        "register_panics_on_invalid_input",
+        "UnownedTask StreamReader"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              254.46787500000312,
+              252.8441660000027,
+              250.65337499999885
+            ],
+            "medianMs": 252.8441660000027,
+            "medianPeakRssMiB": 100.828125
+          },
+          "cgr": {
+            "samplesMs": [
+              15.549458000002403,
+              14.912375000001532,
+              13.809541999997066
+            ],
+            "medianMs": 14.912375000001532,
+            "medianPeakRssMiB": 14.765625
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              537.4029580000013,
+              553.0747910000002,
+              551.4019169999997
+            ],
+            "medianMs": 551.4019169999997,
+            "medianPeakRssMiB": 183.9375
+          },
+          "cgr": {
+            "samplesMs": [
+              41.4614590000042,
+              41.35537500000197,
+              41.57624999999854
+            ],
+            "medianMs": 41.4614590000042,
+            "medianPeakRssMiB": 40.9375
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              566.7486660000022,
+              586.6556669999952,
+              559.1400840000063
+            ],
+            "medianMs": 566.7486660000022,
+            "medianPeakRssMiB": 200.90625
+          },
+          "cgr": {
+            "samplesMs": [
+              56.55566600000128,
+              23.024457999994752,
+              55.288042000000814
+            ],
+            "medianMs": 55.288042000000814,
+            "medianPeakRssMiB": 42.3125
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              115.10079100000326,
+              116.72983300000084,
+              115.13154099999667
+            ],
+            "medianMs": 115.13154099999667,
+            "medianPeakRssMiB": 74.0625
+          },
+          "cgr": {
+            "samplesMs": [
+              6.457791999999074,
+              6.252832999997793,
+              6.371749999999565
+            ],
+            "medianMs": 6.371749999999565,
+            "medianPeakRssMiB": 9.234375
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              1520.2231250000011
+            ],
+            "medianMs": 1520.2231250000011,
+            "medianPeakRssMiB": 348.34375,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 1.330709,
+                "p50": 20.912583,
+                "p95": 38.200417,
+                "p99": 49.001291,
+                "max": 49.001291,
+                "mean": 19.065655516666666
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 557,
+                "p50": 24917,
+                "p95": 24994,
+                "p99": 24998,
+                "max": 24998,
+                "mean": 17688.7
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              33.70716699999576
+            ],
+            "medianMs": 33.70716699999576,
+            "medianPeakRssMiB": 13.671875,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 1.0067920000000001,
+                "mean": 0.39830204999999996,
+                "min": 0.017792,
+                "n": 60,
+                "p50": 0.426375,
+                "p95": 0.745667,
+                "p99": 1.0067920000000001
+              },
+              "outputChars": {
+                "max": 24917.0,
+                "mean": 15980.95,
+                "min": 287.0,
+                "n": 20,
+                "p50": 20549.0,
+                "p95": 24529.0,
+                "p99": 24917.0
+              },
+              "queries": 20,
+              "root": "corpus/tokio",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 1.0067920000000001,
+                  "query": "how does open_inner work with as_std_mut"
+                },
+                {
+                  "ms": 0.975,
+                  "query": "how does open_inner work with as_std_mut"
+                },
+                {
+                  "ms": 0.954,
+                  "query": "how does open_inner work with as_std_mut"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "django": {
+      "name": "Django",
+      "language": "Python",
+      "repository": "django/django",
+      "commit": "a05e16a7230fe33d3f43f4a3aaed103cebb42efc",
+      "files": 2984,
+      "excludedOnBothSides": 43,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "8b5b1e15e90cd11b59609994ac0fe68494a734e899dd3a687bfc2c1835592511",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            12065.731375,
+            11915.392874999994,
+            12068.440166999992
+          ],
+          "medianMs": 12065.731375,
+          "medianPeakRssMiB": 1622.65625
+        },
+        "cgr": {
+          "samplesMs": [
+            1604.2113749999912,
+            1617.3105419999983,
+            1645.1414579999978
+          ],
+          "medianMs": 1617.3105419999983,
+          "medianPeakRssMiB": 257.90625
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            840.202459000011,
+            823.7439169999732,
+            848.5393340000087
+          ],
+          "medianMs": 840.202459000011,
+          "medianPeakRssMiB": 297.046875
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 211778,
+          "oracle": 194186,
+          "intersection": 185192,
+          "cgrOnly": 26586,
+          "oracleOnly": 8994,
+          "precision": 0.8744628809413632,
+          "recall": 0.9536835817206184,
+          "f1": 0.9123567606979931,
+          "jaccard": 0.8388382584748066
+        },
+        "calls": {
+          "cgr": 70171,
+          "oracle": 56977,
+          "intersection": 50492,
+          "cgrOnly": 19679,
+          "oracleOnly": 6485,
+          "precision": 0.7195565119493808,
+          "recall": 0.886182143672008,
+          "f1": 0.7942240538584955,
+          "jaccard": 0.6586829471926529,
+          "pStar": 0.9745232764610515,
+          "siteMatch": 0.9077058100754783,
+          "diffTarget": 1320,
+          "extraSites": 18359,
+          "missedSites": 5258
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 70171,
+            "oracle": 56977,
+            "intersection": 50492,
+            "cgrOnly": 19679,
+            "oracleOnly": 6485,
+            "precision": 0.7195565119493808,
+            "recall": 0.886182143672008,
+            "f1": 0.7942240538584955,
+            "jaccard": 0.6586829471926529
+          },
+          "contains": {
+            "cgr": 59676,
+            "oracle": 58931,
+            "intersection": 58931,
+            "cgrOnly": 745,
+            "oracleOnly": 0,
+            "precision": 0.98751591929754,
+            "recall": 1.0,
+            "f1": 0.9937187518443262,
+            "jaccard": 0.98751591929754
+          },
+          "decorates": {
+            "cgr": 261,
+            "oracle": 536,
+            "intersection": 260,
+            "cgrOnly": 1,
+            "oracleOnly": 276,
+            "precision": 0.9961685823754789,
+            "recall": 0.48507462686567165,
+            "f1": 0.6524466750313677,
+            "jaccard": 0.48417132216014896
+          },
+          "extends": {
+            "cgr": 9384,
+            "oracle": 9358,
+            "intersection": 9282,
+            "cgrOnly": 102,
+            "oracleOnly": 76,
+            "precision": 0.9891304347826086,
+            "recall": 0.9918786065398589,
+            "f1": 0.9905026144488316,
+            "jaccard": 0.9811839323467231
+          },
+          "imports": {
+            "cgr": 24247,
+            "oracle": 24279,
+            "intersection": 24235,
+            "cgrOnly": 12,
+            "oracleOnly": 44,
+            "precision": 0.9995050934136182,
+            "recall": 0.9981877342559413,
+            "f1": 0.9988459794749207,
+            "jaccard": 0.9976946194063645
+          },
+          "instantiates": {
+            "cgr": 30944,
+            "oracle": 31205,
+            "intersection": 30442,
+            "cgrOnly": 502,
+            "oracleOnly": 763,
+            "precision": 0.983777145811789,
+            "recall": 0.9755487902579715,
+            "f1": 0.9796456901961414,
+            "jaccard": 0.9601034471883181
+          },
+          "references": {
+            "cgr": 17095,
+            "oracle": 12900,
+            "intersection": 11550,
+            "cgrOnly": 5545,
+            "oracleOnly": 1350,
+            "precision": 0.675636150921322,
+            "recall": 0.8953488372093024,
+            "f1": 0.7701283547257877,
+            "jaccard": 0.6261859582542695
+          }
+        },
+        "gatePassed": false
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 2984,
+          "nodeRows": 62755,
+          "uniqueNaturalNodes": 62755,
+          "routeNodes": 840,
+          "edgeRows": 194186,
+          "uniqueEdges": 194186,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 2984,
+          "nodeRows": 62660,
+          "uniqueNaturalNodes": 62660,
+          "routeNodes": 745,
+          "edgeRows": 211778,
+          "uniqueEdges": 211778,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "django/core/handlers/base.py",
+        "renamedSymbol": "get_response",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 79 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; 24 file(s) re-resolved in 100 ms",
+          "renameOccurrences": 5,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "visit_node",
+        "InputStreamExhausted MissingForeignKey",
+        "how does MissingForeignKey work with check_rhs_elements_length_equals_lhs_length",
+        "check_rhs_elements_length_equals_lhs_length",
+        "Envelope supports_bit_aggregations",
+        "how does supports_bit_aggregations work with CumeDist",
+        "CumeDist",
+        "DeconstructibleSerializer render_to_kml",
+        "how does render_to_kml work with _check_db_comment",
+        "_check_db_comment",
+        "_get_raw_host _validate_values_are_expressions",
+        "how does _validate_values_are_expressions work with NumPoints",
+        "NumPoints",
+        "ProjectState do_query",
+        "how does do_query work with in_prefetched_cache",
+        "in_prefetched_cache",
+        "get_backends PatternLookup",
+        "how does PatternLookup work with path",
+        "path",
+        "AccessMixin visit_node"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              866.2687919999996,
+              846.8159589999971,
+              861.4068750000001
+            ],
+            "medianMs": 861.4068750000001,
+            "medianPeakRssMiB": 114.21875
+          },
+          "cgr": {
+            "samplesMs": [
+              55.7405839999916,
+              55.247540999999956,
+              52.37724999999216
+            ],
+            "medianMs": 55.247540999999956,
+            "medianPeakRssMiB": 17.734375
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              2543.4133330000036,
+              2560.943000000009,
+              2563.938958999998
+            ],
+            "medianMs": 2560.943000000009,
+            "medianPeakRssMiB": 427.0
+          },
+          "cgr": {
+            "samplesMs": [
+              88.34612500000105,
+              84.44958299999428,
+              86.81133299999999
+            ],
+            "medianMs": 86.81133299999999,
+            "medianPeakRssMiB": 64.125
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              2569.5196669999946,
+              2562.416749999997,
+              2582.7080840000035
+            ],
+            "medianMs": 2569.5196669999946,
+            "medianPeakRssMiB": 437.453125
+          },
+          "cgr": {
+            "samplesMs": [
+              113.93858300000659,
+              80.03091699998777,
+              108.39883300000963
+            ],
+            "medianMs": 108.39883300000963,
+            "medianPeakRssMiB": 64.96875
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              121.24866700000325,
+              113.22958300002028,
+              112.16716599997767
+            ],
+            "medianMs": 113.22958300002028,
+            "medianPeakRssMiB": 80.78125
+          },
+          "cgr": {
+            "samplesMs": [
+              6.8021669999893675,
+              6.066666999998915,
+              6.230208000005177
+            ],
+            "medianMs": 6.230208000005177,
+            "medianPeakRssMiB": 9.171875
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              2462.2969580000245
+            ],
+            "medianMs": 2462.2969580000245,
+            "medianPeakRssMiB": 422.0,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 4.8885,
+                "p50": 36.590166,
+                "p95": 51.509583,
+                "p99": 57.815333,
+                "max": 57.815333,
+                "mean": 30.134327716666668
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 612,
+                "p50": 24921,
+                "p95": 24996,
+                "p99": 24999,
+                "max": 24999,
+                "mean": 17245.3
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              49.55941700001176
+            ],
+            "medianMs": 49.55941700001176,
+            "medianPeakRssMiB": 26.671875,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 1.335291,
+                "mean": 0.5899208333333334,
+                "min": 0.017499999999999998,
+                "n": 60,
+                "p50": 0.597042,
+                "p95": 1.278958,
+                "p99": 1.335291
+              },
+              "outputChars": {
+                "max": 24977.0,
+                "mean": 17357.1,
+                "min": 445.0,
+                "n": 20,
+                "p50": 24096.0,
+                "p95": 24945.0,
+                "p99": 24977.0
+              },
+              "queries": 20,
+              "root": "corpus/django",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 1.335291,
+                  "query": "how does render_to_kml work with _check_db_comment"
+                },
+                {
+                  "ms": 1.328209,
+                  "query": "how does render_to_kml work with _check_db_comment"
+                },
+                {
+                  "ms": 1.2917079999999999,
+                  "query": "_get_raw_host _validate_values_are_expressions"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "zod": {
+      "name": "Zod",
+      "language": "TypeScript",
+      "repository": "colinhacks/zod",
+      "commit": "2554b70c3d4a80273381e61d527d820720626440",
+      "files": 522,
+      "excludedOnBothSides": 12,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "4249ccc387040d2ec5247b53e8d9656fae90141994375228afbe22dda17b4cb4",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            3261.919042000017,
+            3269.3439580000077,
+            3274.464332999997
+          ],
+          "medianMs": 3269.3439580000077,
+          "medianPeakRssMiB": 619.703125
+        },
+        "cgr": {
+          "samplesMs": [
+            405.68658399999435,
+            405.8069170000067,
+            410.400334000002
+          ],
+          "medianMs": 405.8069170000067,
+          "medianPeakRssMiB": 105.5
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            228.54937500000005,
+            229.4722499999864,
+            233.46033299998226
+          ],
+          "medianMs": 229.4722499999864,
+          "medianPeakRssMiB": 137.5625
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 38643,
+          "oracle": 36310,
+          "intersection": 35312,
+          "cgrOnly": 3331,
+          "oracleOnly": 998,
+          "precision": 0.9138006883523536,
+          "recall": 0.9725144588267695,
+          "f1": 0.942243806118501,
+          "jaccard": 0.8907948840846598
+        },
+        "calls": {
+          "cgr": 20937,
+          "oracle": 18716,
+          "intersection": 18338,
+          "cgrOnly": 2599,
+          "oracleOnly": 378,
+          "precision": 0.8758656923150404,
+          "recall": 0.9798033767899124,
+          "f1": 0.9249237132121152,
+          "jaccard": 0.8603330987567441,
+          "pStar": 0.9138841821987441,
+          "siteMatch": 0.9802924007925883,
+          "diffTarget": 1728,
+          "extraSites": 871,
+          "missedSites": 368
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 20937,
+            "oracle": 18716,
+            "intersection": 18338,
+            "cgrOnly": 2599,
+            "oracleOnly": 378,
+            "precision": 0.8758656923150404,
+            "recall": 0.9798033767899124,
+            "f1": 0.9249237132121152,
+            "jaccard": 0.8603330987567441
+          },
+          "contains": {
+            "cgr": 8280,
+            "oracle": 8273,
+            "intersection": 8273,
+            "cgrOnly": 7,
+            "oracleOnly": 0,
+            "precision": 0.9991545893719807,
+            "recall": 1.0,
+            "f1": 0.999577115930647,
+            "jaccard": 0.9991545893719807
+          },
+          "extends": {
+            "cgr": 677,
+            "oracle": 677,
+            "intersection": 677,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "implements": {
+            "cgr": 1,
+            "oracle": 1,
+            "intersection": 1,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "imports": {
+            "cgr": 2162,
+            "oracle": 2160,
+            "intersection": 2154,
+            "cgrOnly": 8,
+            "oracleOnly": 6,
+            "precision": 0.996299722479186,
+            "recall": 0.9972222222222222,
+            "f1": 0.9967607589079132,
+            "jaccard": 0.9935424354243543
+          },
+          "instantiates": {
+            "cgr": 289,
+            "oracle": 307,
+            "intersection": 287,
+            "cgrOnly": 2,
+            "oracleOnly": 20,
+            "precision": 0.9930795847750865,
+            "recall": 0.9348534201954397,
+            "f1": 0.9630872483221478,
+            "jaccard": 0.9288025889967637
+          },
+          "navigates": {
+            "cgr": 3,
+            "oracle": 3,
+            "intersection": 3,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "references": {
+            "cgr": 6294,
+            "oracle": 6173,
+            "intersection": 5579,
+            "cgrOnly": 715,
+            "oracleOnly": 594,
+            "precision": 0.886399745789641,
+            "recall": 0.9037745018629516,
+            "f1": 0.8950028074115666,
+            "jaccard": 0.8099593495934959
+          }
+        },
+        "gatePassed": false
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 522,
+          "nodeRows": 8802,
+          "uniqueNaturalNodes": 8802,
+          "routeNodes": 7,
+          "edgeRows": 36310,
+          "uniqueEdges": 36310,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 522,
+          "nodeRows": 8802,
+          "uniqueNaturalNodes": 8802,
+          "routeNodes": 7,
+          "edgeRows": 38643,
+          "uniqueEdges": 38643,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "packages/zod/src/v4/core/parse.ts",
+        "renamedSymbol": "_parse",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 26 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; rebuilt the index (58840 of 67845 references affected) in 390 ms",
+          "renameOccurrences": 5,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "ZodStringFormat",
+        "isDatetime BelarusianSizable",
+        "how does BelarusianSizable work with ZodInt",
+        "ZodInt",
+        "_superRefine objectProcessor",
+        "how does objectProcessor work with compile",
+        "compile",
+        "ZodMiniInt32 customMap",
+        "how does customMap work with ZodNativeEnum",
+        "ZodNativeEnum",
+        "safeParse applyMinItems",
+        "how does applyMinItems work with shape",
+        "shape",
+        "StandardSchemaV1 ZodMiniNumber",
+        "how does ZodMiniNumber work with options",
+        "options",
+        "isSimpleIntersection generateExtendChain",
+        "how does generateExtendChain work with randomString",
+        "randomString",
+        "nativeEnum ZodStringFormat"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              281.7775420000146,
+              279.75620900002696,
+              278.9835000000096
+            ],
+            "medianMs": 279.75620900002696,
+            "medianPeakRssMiB": 100.703125
+          },
+          "cgr": {
+            "samplesMs": [
+              31.174542000002248,
+              16.48137500001212,
+              15.956875000000537
+            ],
+            "medianMs": 16.48137500001212,
+            "medianPeakRssMiB": 14.796875
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              734.5513330000131,
+              735.2115420000018,
+              726.9126670000219
+            ],
+            "medianMs": 734.5513330000131,
+            "medianPeakRssMiB": 241.25
+          },
+          "cgr": {
+            "samplesMs": [
+              33.47733300000755,
+              34.47591700000885,
+              33.08862500000487
+            ],
+            "medianMs": 33.47733300000755,
+            "medianPeakRssMiB": 37.703125
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              1244.5077920000074,
+              1242.171084000006,
+              1256.4181669999925
+            ],
+            "medianMs": 1244.5077920000074,
+            "medianPeakRssMiB": 288.59375
+          },
+          "cgr": {
+            "samplesMs": [
+              415.8295830000043,
+              419.1981250000083,
+              418.13191700001084
+            ],
+            "medianMs": 418.13191700001084,
+            "medianPeakRssMiB": 118.96875
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              125.8268340000086,
+              122.84704199998941,
+              121.58512499999574
+            ],
+            "medianMs": 122.84704199998941,
+            "medianPeakRssMiB": 80.0625
+          },
+          "cgr": {
+            "samplesMs": [
+              6.615582999984326,
+              6.688125000010814,
+              6.2077500000157215
+            ],
+            "medianMs": 6.615582999984326,
+            "medianPeakRssMiB": 9.234375
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              1536.8209160000106
+            ],
+            "medianMs": 1536.8209160000106,
+            "medianPeakRssMiB": 372.578125,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 1.344458,
+                "p50": 22.616542,
+                "p95": 30.604458,
+                "p99": 33.273875,
+                "max": 33.273875,
+                "mean": 19.454105516666665
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 1033,
+                "p50": 24887,
+                "p95": 24981,
+                "p99": 24984,
+                "max": 24984,
+                "mean": 19606.3
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              42.717791999990595
+            ],
+            "medianMs": 42.717791999990595,
+            "medianPeakRssMiB": 15.15625,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 1.15425,
+                "mean": 0.5171353999999999,
+                "min": 0.04025,
+                "n": 60,
+                "p50": 0.44291699999999995,
+                "p95": 1.055791,
+                "p99": 1.15425
+              },
+              "outputChars": {
+                "max": 24873.0,
+                "mean": 17357.4,
+                "min": 445.0,
+                "n": 20,
+                "p50": 23121.0,
+                "p95": 24733.0,
+                "p99": 24873.0
+              },
+              "queries": 20,
+              "root": "corpus/zod",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 1.15425,
+                  "query": "StandardSchemaV1 ZodMiniNumber"
+                },
+                {
+                  "ms": 1.096458,
+                  "query": "StandardSchemaV1 ZodMiniNumber"
+                },
+                {
+                  "ms": 1.0777919999999999,
+                  "query": "how does ZodMiniNumber work with options"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "okhttp": {
+      "name": "OkHttp",
+      "language": "Kotlin/Java",
+      "repository": "square/okhttp",
+      "commit": "16fb6aef3aee1c4645fc8d24af01f8a4dc128ebf",
+      "files": 690,
+      "excludedOnBothSides": 20,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "5061f6e8a6ca42746856916bf25cb44cae342cc64708b9babbe76785508b350c",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            3257.076124999998,
+            3272.0682499999893,
+            3273.326582999999
+          ],
+          "medianMs": 3272.0682499999893,
+          "medianPeakRssMiB": 727.578125
+        },
+        "cgr": {
+          "samplesMs": [
+            561.3857499999995,
+            565.4207080000049,
+            566.930584000005
+          ],
+          "medianMs": 565.4207080000049,
+          "medianPeakRssMiB": 121.4375
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            332.29970799999364,
+            314.10079199997654,
+            327.28212500001064
+          ],
+          "medianMs": 327.28212500001064,
+          "medianPeakRssMiB": 149.140625
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 59154,
+          "oracle": 53018,
+          "intersection": 46876,
+          "cgrOnly": 12278,
+          "oracleOnly": 6142,
+          "precision": 0.7924400716773168,
+          "recall": 0.8841525519634841,
+          "f1": 0.835787897157936,
+          "jaccard": 0.7179000245037981
+        },
+        "calls": {
+          "cgr": 27957,
+          "oracle": 23636,
+          "intersection": 18424,
+          "cgrOnly": 9533,
+          "oracleOnly": 5212,
+          "precision": 0.659012054226133,
+          "recall": 0.7794889152140803,
+          "f1": 0.714205415463338,
+          "jaccard": 0.5554584099611083,
+          "pStar": 0.8337783409512604,
+          "siteMatch": 0.9082229150428682,
+          "diffTarget": 3673,
+          "extraSites": 5860,
+          "missedSites": 1884
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 27957,
+            "oracle": 23636,
+            "intersection": 18424,
+            "cgrOnly": 9533,
+            "oracleOnly": 5212,
+            "precision": 0.659012054226133,
+            "recall": 0.7794889152140803,
+            "f1": 0.714205415463338,
+            "jaccard": 0.5554584099611083
+          },
+          "contains": {
+            "cgr": 19868,
+            "oracle": 19868,
+            "intersection": 19613,
+            "cgrOnly": 255,
+            "oracleOnly": 255,
+            "precision": 0.9871652909200724,
+            "recall": 0.9871652909200724,
+            "f1": 0.9871652909200724,
+            "jaccard": 0.9746558664215077
+          },
+          "decorates": {
+            "cgr": 61,
+            "oracle": 61,
+            "intersection": 61,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "extends": {
+            "cgr": 312,
+            "oracle": 313,
+            "intersection": 310,
+            "cgrOnly": 2,
+            "oracleOnly": 3,
+            "precision": 0.9935897435897436,
+            "recall": 0.9904153354632588,
+            "f1": 0.992,
+            "jaccard": 0.9841269841269841
+          },
+          "implements": {
+            "cgr": 270,
+            "oracle": 270,
+            "intersection": 223,
+            "cgrOnly": 47,
+            "oracleOnly": 47,
+            "precision": 0.825925925925926,
+            "recall": 0.825925925925926,
+            "f1": 0.825925925925926,
+            "jaccard": 0.7034700315457413
+          },
+          "imports": {
+            "cgr": 2814,
+            "oracle": 1882,
+            "intersection": 1799,
+            "cgrOnly": 1015,
+            "oracleOnly": 83,
+            "precision": 0.6393034825870647,
+            "recall": 0.9558979808714134,
+            "f1": 0.76618398637138,
+            "jaccard": 0.6209872281670694
+          },
+          "instantiates": {
+            "cgr": 5318,
+            "oracle": 4416,
+            "intersection": 4098,
+            "cgrOnly": 1220,
+            "oracleOnly": 318,
+            "precision": 0.7705904475366679,
+            "recall": 0.9279891304347826,
+            "f1": 0.8419971234846928,
+            "jaccard": 0.727111426543648
+          },
+          "references": {
+            "cgr": 2554,
+            "oracle": 2572,
+            "intersection": 2348,
+            "cgrOnly": 206,
+            "oracleOnly": 224,
+            "precision": 0.9193422083007048,
+            "recall": 0.9129082426127527,
+            "f1": 0.9161139289894655,
+            "jaccard": 0.8452123830093593
+          }
+        },
+        "gatePassed": false
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 690,
+          "nodeRows": 20558,
+          "uniqueNaturalNodes": 20558,
+          "routeNodes": 0,
+          "edgeRows": 53018,
+          "uniqueEdges": 53018,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 690,
+          "nodeRows": 20558,
+          "uniqueNaturalNodes": 20558,
+          "routeNodes": 0,
+          "edgeRows": 59154,
+          "uniqueEdges": 59154,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "okhttp/src/commonJvmAndroid/kotlin/okhttp3/OkHttpClient.kt",
+        "renamedSymbol": "newCall",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 49 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; 173 file(s) re-resolved in 124 ms",
+          "renameOccurrences": 2,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "WebSocketProtocol",
+        "pushDataLater loopReader",
+        "how does loopReader work with skipCommasAndWhitespace",
+        "skipCommasAndWhitespace",
+        "writeUtf8 onRecords",
+        "how does onRecords work with Gzip",
+        "Gzip",
+        "keyManager urls",
+        "how does urls work with createFormData",
+        "createFormData",
+        "clean AggregateEventListener",
+        "how does AggregateEventListener work with RoutePlanner",
+        "RoutePlanner",
+        "OkHostnameVerifier part",
+        "how does part work with readLiteralHeaderWithIncrementalIndexingNewName",
+        "readLiteralHeaderWithIncrementalIndexingNewName",
+        "readControlFrame deflate",
+        "how does deflate work with peek",
+        "peek",
+        "CertificatePinner WebSocketProtocol"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              336.5844589999938,
+              333.36529200002474,
+              332.89725000000203
+            ],
+            "medianMs": 333.36529200002474,
+            "medianPeakRssMiB": 102.046875
+          },
+          "cgr": {
+            "samplesMs": [
+              19.441499999999223,
+              21.121041000014884,
+              19.17975000000638
+            ],
+            "medianMs": 19.441499999999223,
+            "medianPeakRssMiB": 15.34375
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              724.711291999995,
+              731.9917499999917,
+              723.8082909999832
+            ],
+            "medianMs": 724.711291999995,
+            "medianPeakRssMiB": 255.28125
+          },
+          "cgr": {
+            "samplesMs": [
+              56.559082999996235,
+              56.88904200002298,
+              56.63924999998926
+            ],
+            "medianMs": 56.63924999998926,
+            "medianPeakRssMiB": 50.28125
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              812.5404169999797,
+              840.7161669999823,
+              815.4871250000042
+            ],
+            "medianMs": 815.4871250000042,
+            "medianPeakRssMiB": 272.265625
+          },
+          "cgr": {
+            "samplesMs": [
+              131.83166700000015,
+              42.49366700000223,
+              131.6985420000094
+            ],
+            "medianMs": 131.6985420000094,
+            "medianPeakRssMiB": 52.78125
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              110.64591699999937,
+              112.13612499997794,
+              111.94075000000225
+            ],
+            "medianMs": 111.94075000000225,
+            "medianPeakRssMiB": 74.984375
+          },
+          "cgr": {
+            "samplesMs": [
+              6.726040999978977,
+              7.200915999987956,
+              7.2523329999967245
+            ],
+            "medianMs": 7.200915999987956,
+            "medianPeakRssMiB": 9.765625
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              1339.5399589999784
+            ],
+            "medianMs": 1339.5399589999784,
+            "medianPeakRssMiB": 323.453125,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 1.722042,
+                "p50": 17.437917,
+                "p95": 31.386208,
+                "p99": 31.732459,
+                "max": 31.732459,
+                "mean": 16.118166
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 846,
+                "p50": 24908,
+                "p95": 24996,
+                "p99": 24998,
+                "max": 24998,
+                "mean": 18007.25
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              32.06758299998569
+            ],
+            "medianMs": 32.06758299998569,
+            "medianPeakRssMiB": 15.578125,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 1.0435830000000001,
+                "mean": 0.3630812166666667,
+                "min": 0.016458,
+                "n": 60,
+                "p50": 0.399125,
+                "p95": 0.7765,
+                "p99": 1.0435830000000001
+              },
+              "outputChars": {
+                "max": 24873.0,
+                "mean": 16640.2,
+                "min": 711.0,
+                "n": 20,
+                "p50": 23383.0,
+                "p95": 24839.0,
+                "p99": 24873.0
+              },
+              "queries": 20,
+              "root": "corpus/okhttp",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 1.0435830000000001,
+                  "query": "CertificatePinner WebSocketProtocol"
+                },
+                {
+                  "ms": 1.0061250000000002,
+                  "query": "CertificatePinner WebSocketProtocol"
+                },
+                {
+                  "ms": 0.9955840000000001,
+                  "query": "CertificatePinner WebSocketProtocol"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "cjson": {
+      "name": "cJSON",
+      "language": "C",
+      "repository": "DaveGamble/cJSON",
+      "commit": "6d9f2443ab071f86e5d9b43025a40929ec41c46c",
+      "files": 68,
+      "excludedOnBothSides": 56,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "b1e9f97199bf614436bf843e6005ebb89082e1c2446ce741a8da177bb86b6217",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            509.2574999999897,
+            517.7017089999936,
+            515.0850830000024
+          ],
+          "medianMs": 515.0850830000024,
+          "medianPeakRssMiB": 296.46875
+        },
+        "cgr": {
+          "samplesMs": [
+            62.289582999994764,
+            64.37550000001124,
+            62.980541999991146
+          ],
+          "medianMs": 62.980541999991146,
+          "medianPeakRssMiB": 35.53125
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            50.70812499999988,
+            46.48341699999037,
+            45.06479200000513
+          ],
+          "medianMs": 46.48341699999037,
+          "medianPeakRssMiB": 45.328125
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 3757,
+          "oracle": 3766,
+          "intersection": 3745,
+          "cgrOnly": 12,
+          "oracleOnly": 21,
+          "precision": 0.9968059622038861,
+          "recall": 0.9944237918215614,
+          "f1": 0.9956134520802872,
+          "jaccard": 0.9912652196929592
+        },
+        "calls": {
+          "cgr": 1687,
+          "oracle": 1693,
+          "intersection": 1684,
+          "cgrOnly": 3,
+          "oracleOnly": 9,
+          "precision": 0.998221695317131,
+          "recall": 0.9946839929119905,
+          "f1": 0.9964497041420117,
+          "jaccard": 0.9929245283018868,
+          "pStar": 0.9988137603795967,
+          "siteMatch": 0.9958653278204371,
+          "diffTarget": 2,
+          "extraSites": 1,
+          "missedSites": 7
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 1687,
+            "oracle": 1693,
+            "intersection": 1684,
+            "cgrOnly": 3,
+            "oracleOnly": 9,
+            "precision": 0.998221695317131,
+            "recall": 0.9946839929119905,
+            "f1": 0.9964497041420117,
+            "jaccard": 0.9929245283018868
+          },
+          "contains": {
+            "cgr": 1601,
+            "oracle": 1603,
+            "intersection": 1596,
+            "cgrOnly": 5,
+            "oracleOnly": 7,
+            "precision": 0.9968769519050593,
+            "recall": 0.9956331877729258,
+            "f1": 0.9962546816479401,
+            "jaccard": 0.9925373134328358
+          },
+          "implements": {
+            "cgr": 2,
+            "oracle": 2,
+            "intersection": 2,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "imports": {
+            "cgr": 90,
+            "oracle": 91,
+            "intersection": 90,
+            "cgrOnly": 0,
+            "oracleOnly": 1,
+            "precision": 1.0,
+            "recall": 0.989010989010989,
+            "f1": 0.994475138121547,
+            "jaccard": 0.989010989010989
+          },
+          "instantiates": {
+            "cgr": 7,
+            "oracle": 7,
+            "intersection": 7,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "references": {
+            "cgr": 370,
+            "oracle": 370,
+            "intersection": 366,
+            "cgrOnly": 4,
+            "oracleOnly": 4,
+            "precision": 0.9891891891891892,
+            "recall": 0.9891891891891892,
+            "f1": 0.9891891891891892,
+            "jaccard": 0.9786096256684492
+          }
+        },
+        "gatePassed": true
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 68,
+          "nodeRows": 1671,
+          "uniqueNaturalNodes": 1671,
+          "routeNodes": 0,
+          "edgeRows": 3766,
+          "uniqueEdges": 3766,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 68,
+          "nodeRows": 1669,
+          "uniqueNaturalNodes": 1669,
+          "routeNodes": 0,
+          "edgeRows": 3757,
+          "uniqueEdges": 3757,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "cJSON.c",
+        "renamedSymbol": "cJSON_ParseWithOpts",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 23 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; 4 file(s) re-resolved in 23 ms",
+          "renameOccurrences": 2,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "cJSON_Compare",
+        "get_array_item create_reference",
+        "how does create_reference work with print_string_ptr",
+        "print_string_ptr",
+        "cJSON_SetValuestring update_offset",
+        "how does update_offset work with cJSONUtils_MergePatchCaseSensitive",
+        "cJSONUtils_MergePatchCaseSensitive",
+        "cJSON_DeleteItemFromObject add_item_to_array",
+        "how does add_item_to_array work with cJSON_GetObjectItem",
+        "cJSON_GetObjectItem",
+        "cJSON_AddItemReferenceToObject detach_item_from_array",
+        "how does detach_item_from_array work with cJSON_AddObjectToObject",
+        "cJSON_AddObjectToObject",
+        "insert_item_in_array cJSON_HasObjectItem",
+        "how does cJSON_HasObjectItem work with internal_hooks",
+        "internal_hooks",
+        "cJSONUtils_ApplyPatchesCaseSensitive cJSON_DetachItemViaPointer",
+        "how does cJSON_DetachItemViaPointer work with detach_path",
+        "detach_path",
+        "cJSON_free cJSON_Compare"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              205.19920800001046,
+              201.08387500002323,
+              202.5934579999955
+            ],
+            "medianMs": 202.5934579999955,
+            "medianPeakRssMiB": 92.40625
+          },
+          "cgr": {
+            "samplesMs": [
+              14.09174999997731,
+              13.790457999988348,
+              13.919833000016979
+            ],
+            "medianMs": 13.919833000016979,
+            "medianPeakRssMiB": 13.3125
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              361.23029099999826,
+              364.9863329999903,
+              359.71474999999486
+            ],
+            "medianMs": 361.23029099999826,
+            "medianPeakRssMiB": 170.9375
+          },
+          "cgr": {
+            "samplesMs": [
+              29.90458299998977,
+              29.696916999995437,
+              29.90483299998914
+            ],
+            "medianMs": 29.90458299998977,
+            "medianPeakRssMiB": 28.4375
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              351.1573339999927,
+              365.14599999998154,
+              363.73383299999773
+            ],
+            "medianMs": 363.73383299999773,
+            "medianPeakRssMiB": 167.453125
+          },
+          "cgr": {
+            "samplesMs": [
+              28.819583000000648,
+              16.35391700000355,
+              30.125333000000865
+            ],
+            "medianMs": 28.819583000000648,
+            "medianPeakRssMiB": 28.359375
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              113.79754200001457,
+              114.95587500002102,
+              113.94041700000912
+            ],
+            "medianMs": 113.94041700000912,
+            "medianPeakRssMiB": 71.671875
+          },
+          "cgr": {
+            "samplesMs": [
+              6.688999999994394,
+              6.72020799999018,
+              6.71595800000091
+            ],
+            "medianMs": 6.71595800000091,
+            "medianPeakRssMiB": 9.109375
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              664.7481669999991
+            ],
+            "medianMs": 664.7481669999991,
+            "medianPeakRssMiB": 228.3125,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 0.441291,
+                "p50": 9.216459,
+                "p95": 11.696667,
+                "p99": 33.191708,
+                "max": 33.191708,
+                "mean": 7.119217449999999
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 728,
+                "p50": 13769,
+                "p95": 16254,
+                "p99": 17106,
+                "max": 17106,
+                "mean": 10281.6
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              17.333624999992026
+            ],
+            "medianMs": 17.333624999992026,
+            "medianPeakRssMiB": 10.125,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 0.25225,
+                "mean": 0.14615901666666664,
+                "min": 0.025083,
+                "n": 60,
+                "p50": 0.17875000000000002,
+                "p95": 0.24175,
+                "p99": 0.25225
+              },
+              "outputChars": {
+                "max": 18758.0,
+                "mean": 10789.45,
+                "min": 536.0,
+                "n": 20,
+                "p50": 12777.0,
+                "p95": 18312.0,
+                "p99": 18758.0
+              },
+              "queries": 20,
+              "root": "corpus/cjson",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 0.25225,
+                  "query": "how does detach_item_from_array work with cJSON_AddObjectToObject"
+                },
+                {
+                  "ms": 0.251208,
+                  "query": "how does add_item_to_array work with cJSON_GetObjectItem"
+                },
+                {
+                  "ms": 0.244666,
+                  "query": "cJSON_DeleteItemFromObject add_item_to_array"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "fmt": {
+      "name": "fmt",
+      "language": "C++",
+      "repository": "fmtlib/fmt",
+      "commit": "4ed3535092a96ac9f56fab80df83416d51bcc78e",
+      "files": 80,
+      "excludedOnBothSides": 15,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "05dc3021fc5cb2bf60fb683fe7a53439337d4107a433517537d17cbda3fd50bb",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            2323.8445409999995,
+            2333.2803330000047,
+            2396.4750410000024
+          ],
+          "medianMs": 2333.2803330000047,
+          "medianPeakRssMiB": 505.859375
+        },
+        "cgr": {
+          "samplesMs": [
+            315.50495800001954,
+            314.99250000001666,
+            335.60100000002535
+          ],
+          "medianMs": 315.50495800001954,
+          "medianPeakRssMiB": 81.578125
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            173.28245800001696,
+            179.57870899999762,
+            177.609958000005
+          ],
+          "medianMs": 177.609958000005,
+          "medianPeakRssMiB": 100.046875
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 20654,
+          "oracle": 21177,
+          "intersection": 19417,
+          "cgrOnly": 1237,
+          "oracleOnly": 1760,
+          "precision": 0.9401084535683161,
+          "recall": 0.9168909666147235,
+          "f1": 0.928354569577586,
+          "jaccard": 0.8662889265637548
+        },
+        "calls": {
+          "cgr": 10041,
+          "oracle": 10619,
+          "intersection": 9059,
+          "cgrOnly": 982,
+          "oracleOnly": 1560,
+          "precision": 0.9022009759984065,
+          "recall": 0.853093511630097,
+          "f1": 0.8769603097773476,
+          "jaccard": 0.7808809585380571,
+          "pStar": 0.9229750382068262,
+          "siteMatch": 0.9405453292646914,
+          "diffTarget": 756,
+          "extraSites": 226,
+          "missedSites": 604
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 10041,
+            "oracle": 10619,
+            "intersection": 9059,
+            "cgrOnly": 982,
+            "oracleOnly": 1560,
+            "precision": 0.9022009759984065,
+            "recall": 0.853093511630097,
+            "f1": 0.8769603097773476,
+            "jaccard": 0.7808809585380571
+          },
+          "contains": {
+            "cgr": 8708,
+            "oracle": 8727,
+            "intersection": 8695,
+            "cgrOnly": 13,
+            "oracleOnly": 32,
+            "precision": 0.9985071198897566,
+            "recall": 0.9963332187464191,
+            "f1": 0.9974189848006884,
+            "jaccard": 0.9948512585812357
+          },
+          "extends": {
+            "cgr": 244,
+            "oracle": 244,
+            "intersection": 229,
+            "cgrOnly": 15,
+            "oracleOnly": 15,
+            "precision": 0.9385245901639344,
+            "recall": 0.9385245901639344,
+            "f1": 0.9385245901639344,
+            "jaccard": 0.8841698841698842
+          },
+          "imports": {
+            "cgr": 174,
+            "oracle": 230,
+            "intersection": 173,
+            "cgrOnly": 1,
+            "oracleOnly": 57,
+            "precision": 0.9942528735632183,
+            "recall": 0.7521739130434782,
+            "f1": 0.8564356435643563,
+            "jaccard": 0.7489177489177489
+          },
+          "instantiates": {
+            "cgr": 647,
+            "oracle": 636,
+            "intersection": 571,
+            "cgrOnly": 76,
+            "oracleOnly": 65,
+            "precision": 0.8825347758887172,
+            "recall": 0.8977987421383647,
+            "f1": 0.8901013250194857,
+            "jaccard": 0.8019662921348315
+          },
+          "references": {
+            "cgr": 840,
+            "oracle": 721,
+            "intersection": 690,
+            "cgrOnly": 150,
+            "oracleOnly": 31,
+            "precision": 0.8214285714285714,
+            "recall": 0.957004160887656,
+            "f1": 0.8840486867392696,
+            "jaccard": 0.7921928817451206
+          }
+        },
+        "gatePassed": false
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 80,
+          "nodeRows": 8668,
+          "uniqueNaturalNodes": 8668,
+          "routeNodes": 0,
+          "edgeRows": 21177,
+          "uniqueEdges": 21177,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 80,
+          "nodeRows": 8662,
+          "uniqueNaturalNodes": 8662,
+          "routeNodes": 0,
+          "edgeRows": 20654,
+          "uniqueEdges": 20654,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "include/fmt/format.h",
+        "renamedSymbol": "format_decimal",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 54 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; 2 file(s) re-resolved in 56 ms",
+          "renameOccurrences": 11,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "count_digits_fallback",
+        "write_padded on_error",
+        "how does on_error work with remove_prefix",
+        "remove_prefix",
+        "nested advance_to",
+        "how does advance_to work with write_sign",
+        "write_sign",
+        "on_abbr_month is_tuple_like_",
+        "how does is_tuple_like_ work with big_decimal_fp",
+        "big_decimal_fp",
+        "tm_wday_short_name min_enumerator",
+        "how does min_enumerator work with format_hexfloat",
+        "format_hexfloat",
+        "is_printable size_padding",
+        "how does size_padding work with container_buffer",
+        "container_buffer",
+        "fill_size write_padding",
+        "how does write_padding work with on_iso_week_based_year",
+        "on_iso_week_based_year",
+        "collect count_digits_fallback"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              202.86279199999058,
+              197.80133400001887,
+              197.89941700000213
+            ],
+            "medianMs": 197.89941700000213,
+            "medianPeakRssMiB": 91.609375
+          },
+          "cgr": {
+            "samplesMs": [
+              14.594333000019333,
+              13.882583000025761,
+              13.78608400000303
+            ],
+            "medianMs": 13.882583000025761,
+            "medianPeakRssMiB": 13.078125
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              1016.946125000004,
+              999.8584999999878,
+              1017.1207920000143
+            ],
+            "medianMs": 1016.946125000004,
+            "medianPeakRssMiB": 281.390625
+          },
+          "cgr": {
+            "samplesMs": [
+              61.57104199999708,
+              61.862958000006074,
+              62.71870800000556
+            ],
+            "medianMs": 61.862958000006074,
+            "medianPeakRssMiB": 45.5
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              1020.1859999999954,
+              1014.2224170000134,
+              1018.842415999984
+            ],
+            "medianMs": 1018.842415999984,
+            "medianPeakRssMiB": 296.765625
+          },
+          "cgr": {
+            "samplesMs": [
+              63.4039580000092,
+              19.42991699999652,
+              63.00420799999529
+            ],
+            "medianMs": 63.00420799999529,
+            "medianPeakRssMiB": 48.03125
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              117.06479199997943,
+              117.98195800000144,
+              116.30354199999715
+            ],
+            "medianMs": 117.06479199997943,
+            "medianPeakRssMiB": 72.6875
+          },
+          "cgr": {
+            "samplesMs": [
+              7.1930839999936325,
+              6.982624999977816,
+              7.134667000002537
+            ],
+            "medianMs": 7.134667000002537,
+            "medianPeakRssMiB": 9.953125
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              1089.2348330000061
+            ],
+            "medianMs": 1089.2348330000061,
+            "medianPeakRssMiB": 297.328125,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 1.006917,
+                "p50": 15.288833,
+                "p95": 21.656833,
+                "p99": 24.725,
+                "max": 24.725,
+                "mean": 12.413047850000003
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 383,
+                "p50": 13474,
+                "p95": 14790,
+                "p99": 15269,
+                "max": 15269,
+                "mean": 10201.5
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              26.12570799999503
+            ],
+            "medianMs": 26.12570799999503,
+            "medianPeakRssMiB": 14.28125,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 0.650375,
+                "mean": 0.26909301666666674,
+                "min": 0.0385,
+                "n": 60,
+                "p50": 0.30129100000000003,
+                "p95": 0.560458,
+                "p99": 0.650375
+              },
+              "outputChars": {
+                "max": 19415.0,
+                "mean": 11885.35,
+                "min": 313.0,
+                "n": 20,
+                "p50": 14931.0,
+                "p95": 18905.0,
+                "p99": 19415.0
+              },
+              "queries": 20,
+              "root": "corpus/fmt",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 0.650375,
+                  "query": "how does is_tuple_like_ work with big_decimal_fp"
+                },
+                {
+                  "ms": 0.61425,
+                  "query": "how does write_padding work with on_iso_week_based_year"
+                },
+                {
+                  "ms": 0.609375,
+                  "query": "how does write_padding work with on_iso_week_based_year"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "mediatr": {
+      "name": "MediatR",
+      "language": "C#",
+      "repository": "jbogard/MediatR",
+      "commit": "62010baf12851770553f275ce4047e93f4471e79",
+      "files": 159,
+      "excludedOnBothSides": 4,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "e6bbae6ba5de01b675dc3243dadc858899602488af45302f4d419a682dd66ed4",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            554.8074160000169,
+            554.8980840000013,
+            540.5818339999939
+          ],
+          "medianMs": 554.8074160000169,
+          "medianPeakRssMiB": 209.015625
+        },
+        "cgr": {
+          "samplesMs": [
+            94.3404580000049,
+            94.80229199999712,
+            90.8757919999914
+          ],
+          "medianMs": 94.3404580000049,
+          "medianPeakRssMiB": 50.78125
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            68.88133400002516,
+            65.71029200000567,
+            64.92104099999096
+          ],
+          "medianMs": 65.71029200000567,
+          "medianPeakRssMiB": 83.140625
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 5753,
+          "oracle": 5744,
+          "intersection": 5582,
+          "cgrOnly": 171,
+          "oracleOnly": 162,
+          "precision": 0.9702763775421519,
+          "recall": 0.9717966573816156,
+          "f1": 0.9710359224145428,
+          "jaccard": 0.9437024513947591
+        },
+        "calls": {
+          "cgr": 1530,
+          "oracle": 1545,
+          "intersection": 1407,
+          "cgrOnly": 123,
+          "oracleOnly": 138,
+          "precision": 0.9196078431372549,
+          "recall": 0.9106796116504854,
+          "f1": 0.9151219512195122,
+          "jaccard": 0.8435251798561151,
+          "pStar": 0.9256578947368421,
+          "siteMatch": 0.9407008086253369,
+          "diffTarget": 113,
+          "extraSites": 10,
+          "missedSites": 44
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 1530,
+            "oracle": 1545,
+            "intersection": 1407,
+            "cgrOnly": 123,
+            "oracleOnly": 138,
+            "precision": 0.9196078431372549,
+            "recall": 0.9106796116504854,
+            "f1": 0.9151219512195122,
+            "jaccard": 0.8435251798561151
+          },
+          "contains": {
+            "cgr": 2600,
+            "oracle": 2600,
+            "intersection": 2600,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "extends": {
+            "cgr": 45,
+            "oracle": 45,
+            "intersection": 43,
+            "cgrOnly": 2,
+            "oracleOnly": 2,
+            "precision": 0.9555555555555556,
+            "recall": 0.9555555555555556,
+            "f1": 0.9555555555555556,
+            "jaccard": 0.9148936170212766
+          },
+          "implements": {
+            "cgr": 375,
+            "oracle": 359,
+            "intersection": 359,
+            "cgrOnly": 16,
+            "oracleOnly": 0,
+            "precision": 0.9573333333333334,
+            "recall": 1.0,
+            "f1": 0.9782016348773842,
+            "jaccard": 0.9573333333333334
+          },
+          "imports": {
+            "cgr": 115,
+            "oracle": 115,
+            "intersection": 111,
+            "cgrOnly": 4,
+            "oracleOnly": 4,
+            "precision": 0.9652173913043478,
+            "recall": 0.9652173913043478,
+            "f1": 0.9652173913043478,
+            "jaccard": 0.9327731092436975
+          },
+          "instantiates": {
+            "cgr": 319,
+            "oracle": 317,
+            "intersection": 314,
+            "cgrOnly": 5,
+            "oracleOnly": 3,
+            "precision": 0.9843260188087775,
+            "recall": 0.9905362776025236,
+            "f1": 0.9874213836477986,
+            "jaccard": 0.9751552795031055
+          },
+          "references": {
+            "cgr": 769,
+            "oracle": 763,
+            "intersection": 748,
+            "cgrOnly": 21,
+            "oracleOnly": 15,
+            "precision": 0.9726918075422627,
+            "recall": 0.9803407601572739,
+            "f1": 0.9765013054830287,
+            "jaccard": 0.9540816326530612
+          }
+        },
+        "gatePassed": true
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 159,
+          "nodeRows": 2759,
+          "uniqueNaturalNodes": 2759,
+          "routeNodes": 0,
+          "edgeRows": 5744,
+          "uniqueEdges": 5744,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 159,
+          "nodeRows": 2759,
+          "uniqueNaturalNodes": 2759,
+          "routeNodes": 0,
+          "edgeRows": 5753,
+          "uniqueEdges": 5753,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "src/MediatR/Mediator.cs",
+        "renamedSymbol": "Send",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 18 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; 21 file(s) re-resolved in 20 ms",
+          "renameOccurrences": 3,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "FindInterfacesThatClose",
+        "Process AddAllConcretionsThatClose",
+        "how does AddAllConcretionsThatClose work with CanBeCastTo",
+        "CanBeCastTo",
+        "HandlersOrderer RequestPostProcessorBehavior",
+        "how does RequestPostProcessorBehavior work with IRequestPostProcessor",
+        "IRequestPostProcessor",
+        "CompareTo IStreamPipelineBehavior",
+        "how does IStreamPipelineBehavior work with Equals",
+        "Equals",
+        "StreamRequestHandlerWrapper INotificationPublisher",
+        "how does INotificationPublisher work with Substitute",
+        "Substitute",
+        "AddOpenBehaviors ContainsAssemblyMismatch",
+        "how does ContainsAssemblyMismatch work with RequestPreProcessorBehavior",
+        "RequestPreProcessorBehavior",
+        "PublishCore LicenseValidator",
+        "how does LicenseValidator work with ServiceRegistrar",
+        "ServiceRegistrar",
+        "RequestExceptionProcessorBehavior FindInterfacesThatClose"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              207.33216700000412,
+              206.65266599999654,
+              208.5064999999986
+            ],
+            "medianMs": 207.33216700000412,
+            "medianPeakRssMiB": 98.4375
+          },
+          "cgr": {
+            "samplesMs": [
+              14.667084000024033,
+              15.54595900000777,
+              14.636124999981348
+            ],
+            "medianMs": 14.667084000024033,
+            "medianPeakRssMiB": 16.859375
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              331.28899999999817,
+              332.78554200001054,
+              326.59833399998206
+            ],
+            "medianMs": 331.28899999999817,
+            "medianPeakRssMiB": 138.59375
+          },
+          "cgr": {
+            "samplesMs": [
+              25.58079199999952,
+              25.753791999989062,
+              25.54908299998715
+            ],
+            "medianMs": 25.58079199999952,
+            "medianPeakRssMiB": 33.375
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              341.6257499999915,
+              341.7842080000071,
+              347.91812500000674
+            ],
+            "medianMs": 341.7842080000071,
+            "medianPeakRssMiB": 144.90625
+          },
+          "cgr": {
+            "samplesMs": [
+              28.197750000003907,
+              19.598625000014636,
+              28.354250000006687
+            ],
+            "medianMs": 28.197750000003907,
+            "medianPeakRssMiB": 34.375
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              115.72670900000048,
+              113.95425000000614,
+              114.69641599998681
+            ],
+            "medianMs": 114.69641599998681,
+            "medianPeakRssMiB": 70.484375
+          },
+          "cgr": {
+            "samplesMs": [
+              7.440000000002556,
+              6.89283299999488,
+              6.7982909999955154
+            ],
+            "medianMs": 6.89283299999488,
+            "medianPeakRssMiB": 9.28125
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              685.3280830000017
+            ],
+            "medianMs": 685.3280830000017,
+            "medianPeakRssMiB": 237.453125,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 0.494542,
+                "p50": 9.718584,
+                "p95": 12.566416,
+                "p99": 13.551584,
+                "max": 13.551584,
+                "mean": 7.3043986
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 1444,
+                "p50": 11919,
+                "p95": 19576,
+                "p99": 19830,
+                "max": 19830,
+                "mean": 10880.25
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              20.21191700001168
+            ],
+            "medianMs": 20.21191700001168,
+            "medianPeakRssMiB": 10.984375,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 0.431,
+                "mean": 0.18328334999999996,
+                "min": 0.0165,
+                "n": 60,
+                "p50": 0.17875000000000002,
+                "p95": 0.3745,
+                "p99": 0.431
+              },
+              "outputChars": {
+                "max": 22635.0,
+                "mean": 10073.7,
+                "min": 586.0,
+                "n": 20,
+                "p50": 10346.0,
+                "p95": 20237.0,
+                "p99": 22635.0
+              },
+              "queries": 20,
+              "root": "corpus/mediatr",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 0.431,
+                  "query": "RequestExceptionProcessorBehavior FindInterfacesThatClose"
+                },
+                {
+                  "ms": 0.395,
+                  "query": "RequestExceptionProcessorBehavior FindInterfacesThatClose"
+                },
+                {
+                  "ms": 0.38787499999999997,
+                  "query": "RequestExceptionProcessorBehavior FindInterfacesThatClose"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "slim": {
+      "name": "Slim",
+      "language": "PHP",
+      "repository": "slimphp/Slim",
+      "commit": "3675bf6baac66b07032575b7bef4200b60b7974b",
+      "files": 125,
+      "excludedOnBothSides": 5,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "6a427da1d3be0cf643fda0bc59357d73e808fda0983ba50497fc2880a182d7fa",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            457.807540999994,
+            453.04974999999104,
+            459.1013339999961
+          ],
+          "medianMs": 457.807540999994,
+          "medianPeakRssMiB": 179.03125
+        },
+        "cgr": {
+          "samplesMs": [
+            68.39554199999043,
+            70.08620799999221,
+            69.56441599999152
+          ],
+          "medianMs": 69.56441599999152,
+          "medianPeakRssMiB": 36.234375
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            51.495625000001155,
+            50.6132090000051,
+            50.97795899999369
+          ],
+          "medianMs": 50.97795899999369,
+          "medianPeakRssMiB": 43.265625
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 4529,
+          "oracle": 4662,
+          "intersection": 4448,
+          "cgrOnly": 81,
+          "oracleOnly": 214,
+          "precision": 0.9821152572311769,
+          "recall": 0.954096954096954,
+          "f1": 0.967903383744968,
+          "jaccard": 0.9378030782205355
+        },
+        "calls": {
+          "cgr": 1155,
+          "oracle": 1288,
+          "intersection": 1074,
+          "cgrOnly": 81,
+          "oracleOnly": 214,
+          "precision": 0.9298701298701298,
+          "recall": 0.8338509316770186,
+          "f1": 0.8792468276708965,
+          "jaccard": 0.7845142439737034,
+          "pStar": 0.9347258485639687,
+          "siteMatch": 0.8874223602484472,
+          "diffTarget": 75,
+          "extraSites": 6,
+          "missedSites": 145
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 1155,
+            "oracle": 1288,
+            "intersection": 1074,
+            "cgrOnly": 81,
+            "oracleOnly": 214,
+            "precision": 0.9298701298701298,
+            "recall": 0.8338509316770186,
+            "f1": 0.8792468276708965,
+            "jaccard": 0.7845142439737034
+          },
+          "contains": {
+            "cgr": 2041,
+            "oracle": 2041,
+            "intersection": 2041,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "extends": {
+            "cgr": 54,
+            "oracle": 54,
+            "intersection": 54,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "implements": {
+            "cgr": 22,
+            "oracle": 22,
+            "intersection": 22,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "imports": {
+            "cgr": 306,
+            "oracle": 306,
+            "intersection": 306,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "instantiates": {
+            "cgr": 390,
+            "oracle": 390,
+            "intersection": 390,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "references": {
+            "cgr": 561,
+            "oracle": 561,
+            "intersection": 561,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          }
+        },
+        "gatePassed": true
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 125,
+          "nodeRows": 2166,
+          "uniqueNaturalNodes": 2166,
+          "routeNodes": 0,
+          "edgeRows": 4662,
+          "uniqueEdges": 4662,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 125,
+          "nodeRows": 2166,
+          "uniqueNaturalNodes": 2166,
+          "routeNodes": 0,
+          "edgeRows": 4529,
+          "uniqueEdges": 4529,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "Slim/App.php",
+        "renamedSymbol": "handle",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 14 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; 22 file(s) re-resolved in 18 ms",
+          "renameOccurrences": 3,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "NyholmPsr17Factory",
+        "Logger setContainer",
+        "how does setContainer work with getRouteCollector",
+        "getRouteCollector",
+        "getDispatcher RouteGroup",
+        "how does RouteGroup work with setRouteResolver",
+        "setRouteResolver",
+        "setAllowedMethods HttpSoftPsr17Factory",
+        "how does HttpSoftPsr17Factory work with setDescription",
+        "setDescription",
+        "getArguments getDefaultLogger",
+        "how does getDefaultLogger work with setArgument",
+        "setArgument",
+        "getCallableResolver Dispatcher",
+        "how does Dispatcher work with HttpBadRequestException",
+        "HttpBadRequestException",
+        "isStreamFactoryAvailable setPsr17FactoryProvider",
+        "how does setPsr17FactoryProvider work with ServerRequestCreatorInterface",
+        "ServerRequestCreatorInterface",
+        "delete NyholmPsr17Factory"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              193.41587499999946,
+              194.5176669999853,
+              191.08258299999648
+            ],
+            "medianMs": 193.41587499999946,
+            "medianPeakRssMiB": 92.015625
+          },
+          "cgr": {
+            "samplesMs": [
+              14.002457999993112,
+              14.011791000001494,
+              13.29837500000508
+            ],
+            "medianMs": 14.002457999993112,
+            "medianPeakRssMiB": 12.46875
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              263.3429169999886,
+              266.02249999999117,
+              267.75837499999966
+            ],
+            "medianMs": 266.02249999999117,
+            "medianPeakRssMiB": 117.03125
+          },
+          "cgr": {
+            "samplesMs": [
+              20.08299999999963,
+              20.818166999987398,
+              20.349124999995638
+            ],
+            "medianMs": 20.349124999995638,
+            "medianPeakRssMiB": 23.359375
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              271.44916599999647,
+              271.590333000006,
+              262.2017080000205
+            ],
+            "medianMs": 271.44916599999647,
+            "medianPeakRssMiB": 118.125
+          },
+          "cgr": {
+            "samplesMs": [
+              25.453083000002152,
+              16.708084000015333,
+              23.85141700000304
+            ],
+            "medianMs": 23.85141700000304,
+            "medianPeakRssMiB": 23.984375
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              117.18704100002242,
+              116.67554100000643,
+              114.28399999999783
+            ],
+            "medianMs": 116.67554100000643,
+            "medianPeakRssMiB": 70.140625
+          },
+          "cgr": {
+            "samplesMs": [
+              7.115749999996979,
+              6.84845800000744,
+              6.770709000022634
+            ],
+            "medianMs": 6.84845800000744,
+            "medianPeakRssMiB": 8.90625
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              693.2761250000112
+            ],
+            "medianMs": 693.2761250000112,
+            "medianPeakRssMiB": 221.125,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 0.372416,
+                "p50": 9.790083,
+                "p95": 13.143,
+                "p99": 13.8815,
+                "max": 13.8815,
+                "mean": 7.432317350000002
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 708,
+                "p50": 13134,
+                "p95": 16506,
+                "p99": 17325,
+                "max": 17325,
+                "mean": 10364.1
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              18.404791999984127
+            ],
+            "medianMs": 18.404791999984127,
+            "medianPeakRssMiB": 10.109375,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 0.392792,
+                "mean": 0.15443123333333333,
+                "min": 0.013625000000000002,
+                "n": 60,
+                "p50": 0.158041,
+                "p95": 0.304792,
+                "p99": 0.392792
+              },
+              "outputChars": {
+                "max": 16259.0,
+                "mean": 6798.4,
+                "min": 563.0,
+                "n": 20,
+                "p50": 6541.0,
+                "p95": 14331.0,
+                "p99": 16259.0
+              },
+              "queries": 20,
+              "root": "corpus/slim",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 0.392792,
+                  "query": "how does setContainer work with getRouteCollector"
+                },
+                {
+                  "ms": 0.32337499999999997,
+                  "query": "how does RouteGroup work with setRouteResolver"
+                },
+                {
+                  "ms": 0.30987499999999996,
+                  "query": "how does setContainer work with getRouteCollector"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "sinatra": {
+      "name": "Sinatra",
+      "language": "Ruby",
+      "repository": "sinatra/sinatra",
+      "commit": "cb22afd7902b566b6eaba6c4ea89739494a65d12",
+      "files": 147,
+      "excludedOnBothSides": 12,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "a5cbd427dfe30b654183c6174c4ab4111e854d79bb4a7aab1babc5ca22df2f9f",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            450.0744579999889,
+            455.1755420000063,
+            452.04250000000457
+          ],
+          "medianMs": 452.04250000000457,
+          "medianPeakRssMiB": 172.640625
+        },
+        "cgr": {
+          "samplesMs": [
+            92.1103750000043,
+            92.80083400000194,
+            92.28824999999574
+          ],
+          "medianMs": 92.28824999999574,
+          "medianPeakRssMiB": 36.5625
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            66.84804200000372,
+            60.51837499995827,
+            61.0787500000356
+          ],
+          "medianMs": 61.0787500000356,
+          "medianPeakRssMiB": 44.125
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 2612,
+          "oracle": 2671,
+          "intersection": 2575,
+          "cgrOnly": 37,
+          "oracleOnly": 96,
+          "precision": 0.9858346094946401,
+          "recall": 0.9640584050917259,
+          "f1": 0.9748249100889645,
+          "jaccard": 0.9508862629246676
+        },
+        "calls": {
+          "cgr": 577,
+          "oracle": 630,
+          "intersection": 566,
+          "cgrOnly": 11,
+          "oracleOnly": 64,
+          "precision": 0.9809358752166378,
+          "recall": 0.8984126984126984,
+          "f1": 0.9378624689312345,
+          "jaccard": 0.8829953198127926,
+          "pStar": 0.9947275922671354,
+          "siteMatch": 0.9031746031746032,
+          "diffTarget": 3,
+          "extraSites": 8,
+          "missedSites": 61
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 577,
+            "oracle": 630,
+            "intersection": 566,
+            "cgrOnly": 11,
+            "oracleOnly": 64,
+            "precision": 0.9809358752166378,
+            "recall": 0.8984126984126984,
+            "f1": 0.9378624689312345,
+            "jaccard": 0.8829953198127926
+          },
+          "contains": {
+            "cgr": 1651,
+            "oracle": 1651,
+            "intersection": 1651,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "extends": {
+            "cgr": 89,
+            "oracle": 89,
+            "intersection": 88,
+            "cgrOnly": 1,
+            "oracleOnly": 1,
+            "precision": 0.9887640449438202,
+            "recall": 0.9887640449438202,
+            "f1": 0.9887640449438202,
+            "jaccard": 0.9777777777777777
+          },
+          "implements": {
+            "cgr": 15,
+            "oracle": 18,
+            "intersection": 15,
+            "cgrOnly": 0,
+            "oracleOnly": 3,
+            "precision": 1.0,
+            "recall": 0.8333333333333334,
+            "f1": 0.9090909090909091,
+            "jaccard": 0.8333333333333334
+          },
+          "imports": {
+            "cgr": 127,
+            "oracle": 108,
+            "intersection": 103,
+            "cgrOnly": 24,
+            "oracleOnly": 5,
+            "precision": 0.8110236220472441,
+            "recall": 0.9537037037037037,
+            "f1": 0.8765957446808511,
+            "jaccard": 0.7803030303030303
+          },
+          "instantiates": {
+            "cgr": 33,
+            "oracle": 46,
+            "intersection": 33,
+            "cgrOnly": 0,
+            "oracleOnly": 13,
+            "precision": 1.0,
+            "recall": 0.717391304347826,
+            "f1": 0.8354430379746834,
+            "jaccard": 0.717391304347826
+          },
+          "references": {
+            "cgr": 120,
+            "oracle": 129,
+            "intersection": 119,
+            "cgrOnly": 1,
+            "oracleOnly": 10,
+            "precision": 0.9916666666666667,
+            "recall": 0.9224806201550387,
+            "f1": 0.9558232931726908,
+            "jaccard": 0.9153846153846154
+          }
+        },
+        "gatePassed": true
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 147,
+          "nodeRows": 1798,
+          "uniqueNaturalNodes": 1798,
+          "routeNodes": 0,
+          "edgeRows": 2671,
+          "uniqueEdges": 2671,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 147,
+          "nodeRows": 1798,
+          "uniqueNaturalNodes": 1798,
+          "routeNodes": 0,
+          "edgeRows": 2612,
+          "uniqueEdges": 2612,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "lib/sinatra/base.rb",
+        "renamedSymbol": "invoke",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 33 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 33 ms",
+          "renameOccurrences": 6,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "cleaned_caller",
+        "redirect on_start",
+        "how does on_start work with setup_traps",
+        "setup_traps",
+        "watchers priority",
+        "how does priority work with SessionHijacking",
+        "SessionHijacking",
+        "namespace time_for",
+        "how does time_for work with expires",
+        "expires",
+        "deleted Application",
+        "how does Application work with builder",
+        "builder",
+        "also_reload public_dir",
+        "how does public_dir work with rendering_method",
+        "rendering_method",
+        "remap_extensions fetch_values",
+        "how does fetch_values work with puts",
+        "puts",
+        "Format cleaned_caller"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              201.9205840000211,
+              201.20620899999153,
+              191.84024999998428
+            ],
+            "medianMs": 201.20620899999153,
+            "medianPeakRssMiB": 93.953125
+          },
+          "cgr": {
+            "samplesMs": [
+              14.78258400001664,
+              13.129666999986966,
+              13.181000000002996
+            ],
+            "medianMs": 13.181000000002996,
+            "medianPeakRssMiB": 13.25
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              342.0149590000108,
+              354.9592910000001,
+              355.16387500001656
+            ],
+            "medianMs": 354.9592910000001,
+            "medianPeakRssMiB": 136.25
+          },
+          "cgr": {
+            "samplesMs": [
+              39.71462499998779,
+              39.89237499999376,
+              40.385125000000244
+            ],
+            "medianMs": 39.89237499999376,
+            "medianPeakRssMiB": 29.765625
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              351.9355830000279,
+              342.0109590000209,
+              355.3900830000032
+            ],
+            "medianMs": 351.9355830000279,
+            "medianPeakRssMiB": 138.84375
+          },
+          "cgr": {
+            "samplesMs": [
+              39.26245799999606,
+              16.15683399998602,
+              41.525957999994034
+            ],
+            "medianMs": 39.26245799999606,
+            "medianPeakRssMiB": 29.5
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              106.71908399996255,
+              108.93533400002298,
+              108.46033299998226
+            ],
+            "medianMs": 108.46033299998226,
+            "medianPeakRssMiB": 67.046875
+          },
+          "cgr": {
+            "samplesMs": [
+              6.516332999979113,
+              6.8026659999986805,
+              6.575542000007317
+            ],
+            "medianMs": 6.575542000007317,
+            "medianPeakRssMiB": 8.96875
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              593.8854159999778
+            ],
+            "medianMs": 593.8854159999778,
+            "medianPeakRssMiB": 227.765625,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 0.316625,
+                "p50": 8.513542,
+                "p95": 10.777667,
+                "p99": 12.70325,
+                "max": 12.70325,
+                "mean": 6.11559375
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 776,
+                "p50": 12323,
+                "p95": 14982,
+                "p99": 15256,
+                "max": 15256,
+                "mean": 9413.35
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              13.334832999987611
+            ],
+            "medianMs": 13.334832999987611,
+            "medianPeakRssMiB": 10.125,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 0.186917,
+                "mean": 0.09029933333333334,
+                "min": 0.015083,
+                "n": 60,
+                "p50": 0.103042,
+                "p95": 0.16037500000000002,
+                "p99": 0.186917
+              },
+              "outputChars": {
+                "max": 11657.0,
+                "mean": 4575.85,
+                "min": 517.0,
+                "n": 20,
+                "p50": 4646.0,
+                "p95": 11469.0,
+                "p99": 11657.0
+              },
+              "queries": 20,
+              "root": "corpus/sinatra",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 0.186917,
+                  "query": "how does on_start work with setup_traps"
+                },
+                {
+                  "ms": 0.16683299999999998,
+                  "query": "remap_extensions fetch_values"
+                },
+                {
+                  "ms": 0.161292,
+                  "query": "namespace time_for"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "alamofire": {
+      "name": "Alamofire",
+      "language": "Swift",
+      "repository": "Alamofire/Alamofire",
+      "commit": "6c2892ea5adb5a03fa81c510933dd782c5ddd9cb",
+      "files": 111,
+      "excludedOnBothSides": 6,
+      "sourceDigestsMatch": true,
+      "fileSetsMatch": true,
+      "sourceDigest": "5220192a44b169f0197ef0ea75c8a968d38d2e103323a17c1e50e39d6cb91dbf",
+      "fullIndex": {
+        "upstream": {
+          "samplesMs": [
+            1248.9094590000036,
+            1265.2363329999616,
+            1255.7264170000053
+          ],
+          "medianMs": 1255.7264170000053,
+          "medianPeakRssMiB": 415.765625
+        },
+        "cgr": {
+          "samplesMs": [
+            281.3512079999896,
+            281.713792000005,
+            283.5896249999905
+          ],
+          "medianMs": 281.713792000005,
+          "medianPeakRssMiB": 76.671875
+        }
+      },
+      "fullIndexAuto": {
+        "cgr": {
+          "samplesMs": [
+            166.5246250000223,
+            158.58254199997646,
+            160.5094999999892
+          ],
+          "medianMs": 160.5094999999892,
+          "medianPeakRssMiB": 93.796875
+        }
+      },
+      "graphAgreement": {
+        "strict": {
+          "cgr": 12184,
+          "oracle": 12485,
+          "intersection": 11657,
+          "cgrOnly": 527,
+          "oracleOnly": 828,
+          "precision": 0.9567465528562049,
+          "recall": 0.9336804164997997,
+          "f1": 0.9450727633872472,
+          "jaccard": 0.8958653550568706
+        },
+        "calls": {
+          "cgr": 4781,
+          "oracle": 5016,
+          "intersection": 4296,
+          "cgrOnly": 485,
+          "oracleOnly": 720,
+          "precision": 0.8985567872829952,
+          "recall": 0.8564593301435407,
+          "f1": 0.8770031642339491,
+          "jaccard": 0.7809489183784767,
+          "pStar": 0.9408672798948752,
+          "siteMatch": 0.8994938539407086,
+          "diffTarget": 270,
+          "extraSites": 215,
+          "missedSites": 417
+        },
+        "byKind": {
+          "calls": {
+            "cgr": 4781,
+            "oracle": 5016,
+            "intersection": 4296,
+            "cgrOnly": 485,
+            "oracleOnly": 720,
+            "precision": 0.8985567872829952,
+            "recall": 0.8564593301435407,
+            "f1": 0.8770031642339491,
+            "jaccard": 0.7809489183784767
+          },
+          "contains": {
+            "cgr": 4490,
+            "oracle": 4490,
+            "intersection": 4490,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "extends": {
+            "cgr": 121,
+            "oracle": 121,
+            "intersection": 121,
+            "cgrOnly": 0,
+            "oracleOnly": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "jaccard": 1.0
+          },
+          "implements": {
+            "cgr": 75,
+            "oracle": 84,
+            "intersection": 75,
+            "cgrOnly": 0,
+            "oracleOnly": 9,
+            "precision": 1.0,
+            "recall": 0.8928571428571429,
+            "f1": 0.9433962264150945,
+            "jaccard": 0.8928571428571429
+          },
+          "instantiates": {
+            "cgr": 1493,
+            "oracle": 1494,
+            "intersection": 1479,
+            "cgrOnly": 14,
+            "oracleOnly": 15,
+            "precision": 0.9906229068988613,
+            "recall": 0.9899598393574297,
+            "f1": 0.9902912621359223,
+            "jaccard": 0.9807692307692307
+          },
+          "references": {
+            "cgr": 1224,
+            "oracle": 1280,
+            "intersection": 1196,
+            "cgrOnly": 28,
+            "oracleOnly": 84,
+            "precision": 0.9771241830065359,
+            "recall": 0.934375,
+            "f1": 0.9552715654952076,
+            "jaccard": 0.9143730886850153
+          }
+        },
+        "gatePassed": false
+      },
+      "graphCounts": {
+        "upstream": {
+          "files": 111,
+          "nodeRows": 4601,
+          "uniqueNaturalNodes": 4601,
+          "routeNodes": 0,
+          "edgeRows": 12485,
+          "uniqueEdges": 12485,
+          "duplicateEdges": 0
+        },
+        "cgr": {
+          "files": 111,
+          "nodeRows": 4601,
+          "uniqueNaturalNodes": 4601,
+          "routeNodes": 0,
+          "edgeRows": 12184,
+          "uniqueEdges": 12184,
+          "duplicateEdges": 0
+        }
+      },
+      "syncEdit": {
+        "file": "Source/Core/Session.swift",
+        "renamedSymbol": "perform",
+        "cgrSyncReport": {
+          "comment": "synced: 0 added, 1 modified, 0 removed, 0 touched; 1 file(s) re-resolved in 28 ms",
+          "rename": "synced: 0 added, 1 modified, 0 removed, 0 touched; 3 file(s) re-resolved in 31 ms",
+          "renameOccurrences": 16,
+          "restoredDiff": 0,
+          "upstreamRestoredDiff": 0
+        }
+      },
+      "queries": [
+        "KeyPathEncoding",
+        "Inner streamSerializer",
+        "how does streamSerializer work with makeAsyncIterator",
+        "makeAsyncIterator",
+        "didSuspendTask RequestConvertible",
+        "how does RequestConvertible work with userAgent",
+        "userAgent",
+        "shouldRetry DuplicateHeaderError",
+        "how does DuplicateHeaderError work with streamingMessages",
+        "streamingMessages",
+        "didCancel didReceiveResumeData",
+        "how does didReceiveResumeData work with sort",
+        "sort",
+        "didFailToAdaptURLRequest CancellationToken",
+        "how does CancellationToken work with DataStreamSerializer",
+        "DataStreamSerializer",
+        "publishStream upload",
+        "how does upload work with Session",
+        "Session",
+        "build KeyPathEncoding"
+      ],
+      "syncAndQuery": {
+        "sync_noop": {
+          "upstream": {
+            "samplesMs": [
+              287.72700000001805,
+              287.1321250000278,
+              287.7525420000211
+            ],
+            "medianMs": 287.72700000001805,
+            "medianPeakRssMiB": 99.921875
+          },
+          "cgr": {
+            "samplesMs": [
+              15.833167000039339,
+              15.026165999984187,
+              15.429208000000472
+            ],
+            "medianMs": 15.429208000000472,
+            "medianPeakRssMiB": 13.03125
+          }
+        },
+        "sync_comment": {
+          "upstream": {
+            "samplesMs": [
+              509.2021250000016,
+              514.6918749999827,
+              516.6782080000303
+            ],
+            "medianMs": 514.6918749999827,
+            "medianPeakRssMiB": 171.59375
+          },
+          "cgr": {
+            "samplesMs": [
+              34.51437500001475,
+              35.55858400000034,
+              36.26670800002785
+            ],
+            "medianMs": 35.55858400000034,
+            "medianPeakRssMiB": 32.40625
+          }
+        },
+        "sync_rename": {
+          "upstream": {
+            "samplesMs": [
+              516.1749170000007,
+              521.0597079999957,
+              520.5746249999947
+            ],
+            "medianMs": 520.5746249999947,
+            "medianPeakRssMiB": 171.84375
+          },
+          "cgr": {
+            "samplesMs": [
+              39.05387499997914,
+              19.486209000035615,
+              38.485249999951066
+            ],
+            "medianMs": 38.485249999951066,
+            "medianPeakRssMiB": 31.953125
+          }
+        },
+        "explore_cli": {
+          "upstream": {
+            "samplesMs": [
+              113.66558299999951,
+              109.71658299996534,
+              113.79941699999563
+            ],
+            "medianMs": 113.66558299999951,
+            "medianPeakRssMiB": 71.21875
+          },
+          "cgr": {
+            "samplesMs": [
+              6.538833999968574,
+              6.291250000003856,
+              6.96179200002689
+            ],
+            "medianMs": 6.538833999968574,
+            "medianPeakRssMiB": 9.15625
+          }
+        },
+        "explore_warm": {
+          "upstream": {
+            "samplesMs": [
+              905.1474589999771
+            ],
+            "medianMs": 905.1474589999771,
+            "medianPeakRssMiB": 295.546875,
+            "handler": {
+              "mode": "explore",
+              "queries": 20,
+              "runs": 3,
+              "latencyMs": {
+                "n": 60,
+                "min": 0.65325,
+                "p50": 12.354583,
+                "p95": 17.141792,
+                "p99": 17.390333,
+                "max": 17.390333,
+                "mean": 10.506334033333333
+              },
+              "outputChars": {
+                "n": 20,
+                "min": 1217,
+                "p50": 13597,
+                "p95": 16248,
+                "p99": 17311,
+                "max": 17311,
+                "mean": 11181.8
+              }
+            }
+          },
+          "cgr": {
+            "samplesMs": [
+              26.10149999998157
+            ],
+            "medianMs": 26.10149999998157,
+            "medianPeakRssMiB": 12.15625,
+            "handler": {
+              "bench": "explore",
+              "latencyMs": {
+                "max": 0.612792,
+                "mean": 0.2777562833333333,
+                "min": 0.018416000000000002,
+                "n": 60,
+                "p50": 0.320625,
+                "p95": 0.486166,
+                "p99": 0.612792
+              },
+              "outputChars": {
+                "max": 19008.0,
+                "mean": 12358.9,
+                "min": 310.0,
+                "n": 20,
+                "p50": 15606.0,
+                "p95": 18925.0,
+                "p99": 19008.0
+              },
+              "queries": 20,
+              "root": "corpus/alamofire",
+              "runs": 3,
+              "slowest": [
+                {
+                  "ms": 0.612792,
+                  "query": "how does upload work with Session"
+                },
+                {
+                  "ms": 0.610125,
+                  "query": "how does upload work with Session"
+                },
+                {
+                  "ms": 0.573709,
+                  "query": "how does upload work with Session"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "summary": {
+    "geoMeanSpeedups": {
+      "fullIndex": 6.41970353205395,
+      "syncNoop": 15.487170263000234,
+      "syncComment": 14.564897898688416,
+      "syncRename": 10.823618526405498,
+      "warmExploreP50": 55.72639547047606,
+      "cliExplore": 17.266605425958943
+    },
+    "rssReductionRangePct": [
+      75.70456754130224,
+      88.01517866554232
+    ],
+    "avgAnswerChars": {
+      "upstreamUtf16": 12807.595833333333,
+      "cgrUtf8Bytes": 11424.454166666668
+    }
+  }
+}
