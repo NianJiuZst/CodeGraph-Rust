@@ -473,6 +473,18 @@ cgr serve --http 127.0.0.1:7878 --path /absolute/path/to/project
 该示例监听 `http://127.0.0.1:7878/mcp`；配置 Token 后，请求需要携带 `Authorization: Bearer <token>`。
 也可以用 `--token` 传入。请根据需要访问源码的客户端选择监听地址和访问凭据。
 
+### 作为 Agent Skill 使用（CLI 工作流）
+
+对于支持加载 `SKILL.md` 的编码 Agent（如 Antigravity、Claude Code、Codex），如果希望免常驻 MCP 服务直接通过 CLI 使用图谱，
+仓库内置了开箱即用的 [`skills/codegraph-rust/SKILL.md`](skills/codegraph-rust/SKILL.md)，涵盖索引检查与增量同步、`cgr explore` 探索、
+定向图谱命令以及经实测沉淀的防坑提效规则（如禁止碎片化分页读文件、批量合并独立图谱查询、符号图谱与 `rg` 字面量检索分工等）。
+
+```sh
+# 示例：全局安装到 Antigravity（需确保 `cgr` 在 PATH 中）
+mkdir -p ~/.gemini/config/skills/codegraph-rust
+cp skills/codegraph-rust/SKILL.md ~/.gemini/config/skills/codegraph-rust/SKILL.md
+```
+
 ## 配置
 
 ### 项目配置

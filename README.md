@@ -546,6 +546,20 @@ This listens at `http://127.0.0.1:7878/mcp` and requires `Authorization: Bearer 
 token is configured. The token can also be supplied with `--token`. Keep the binding and token
 appropriate for the clients that should access the project's source.
 
+### Agent Skill (CLI workflow)
+
+For coding agents that load `SKILL.md` playbooks (such as Antigravity, Claude Code, or Codex)
+without running a persistent MCP server, this repository ships a ready-to-use skill at
+[`skills/codegraph-rust/SKILL.md`](skills/codegraph-rust/SKILL.md) covering index sync, `cgr explore`,
+targeted graph commands, and token-saving anti-pitfall rules (e.g., avoiding micro-paginated file
+reads, batching independent graph queries, and pairing `cgr` with `rg` for non-symbol literals).
+
+```sh
+# Example: install globally for Antigravity (requires `cgr` on PATH)
+mkdir -p ~/.gemini/config/skills/codegraph-rust
+cp skills/codegraph-rust/SKILL.md ~/.gemini/config/skills/codegraph-rust/SKILL.md
+```
+
 ## Configuration
 
 ### Project settings
