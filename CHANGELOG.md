@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-22
+
 ### Vue/Svelte SFC support and deep Rust/Kotlin/Python inference (`ENGINE_VERSION = 14`)
 
 - **Vue (`.vue`) and Svelte (`.svelte`) Single-File Component support** (zero new Tree-sitter C
@@ -46,6 +48,13 @@
     and blanket `BindKind::TraitImpl` in `resolver_fact_sig`; invalidate consumers when exported
     inference providers swap imports, when wildcard imports or `qname` owner members change, and
     for Python subscript receiver expressions.
+
+- **Benchmarks (`docs/benchmarks/2026-11-22-twelve-repo.json`)**:
+  - Refresh the paired 12-repository benchmark in `README.md` / `README.zh-CN.md` against
+    upstream v1.6.4 (`461a5d8`): 6.42× full-index speedup (2w vs 2w; 2.37 s total across all 12
+    repos with auto-threads), 75.7%–88.0% lower peak RSS, 15.49× / 14.56× / 10.82× incremental
+    sync speedups (11 of 12 single-file renames now surgical incremental), 55.73× warm `explore`
+    P50 speedup, and 17.27× CLI `explore` speedup.
 
 ### Upstream v1.6.4 kernel, multi-language precision/recall, and query parity
 
