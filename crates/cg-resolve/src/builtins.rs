@@ -3,6 +3,62 @@
 
 use cg_core::LangFamily;
 
+/// Vue 3 `<script setup>` compiler macros (always compiler-provided, not user symbols).
+pub fn is_vue_compiler_macro(name: &str) -> bool {
+    matches!(name, "defineProps" | "defineEmits" | "defineExpose" | "defineOptions" | "defineSlots" | "defineModel" | "withDefaults")
+}
+
+/// Nuxt auto-imported composables and utilities. Checked only after local/import lookup fails
+/// so a file's own declaration shadows the auto-import.
+pub fn is_nuxt_auto_import(name: &str) -> bool {
+    matches!(
+        name,
+        "useRoute"
+            | "useRouter"
+            | "abortNavigation"
+            | "navigateTo"
+            | "useFetch"
+            | "useAsyncData"
+            | "useLazyFetch"
+            | "useLazyAsyncData"
+            | "refreshNuxtData"
+            | "useState"
+            | "clearNuxtState"
+            | "useHead"
+            | "useSeoMeta"
+            | "useServerSeoMeta"
+            | "useRuntimeConfig"
+            | "useAppConfig"
+            | "useNuxtApp"
+            | "useCookie"
+            | "useError"
+            | "createError"
+            | "showError"
+            | "clearError"
+            | "definePageMeta"
+            | "defineNuxtConfig"
+            | "defineNuxtPlugin"
+            | "defineNuxtRouteMiddleware"
+            | "useRequestHeaders"
+            | "useRequestEvent"
+            | "useRequestFetch"
+            | "useRequestURL"
+    )
+}
+
+/// Svelte 5 compiler runes.
+pub fn is_svelte_rune(name: &str) -> bool {
+    matches!(name, "$props" | "$state" | "$derived" | "$effect" | "$bindable" | "$inspect" | "$host" | "$snippet")
+}
+
+/// Svelte 5 rune member calls (`$state.raw`, `$derived.by`, `$effect.pre`, etc.).
+pub fn is_svelte_rune_member(root: &str, method: &str) -> bool {
+    matches!(
+        (root, method),
+        ("$state", "raw" | "snapshot" | "is") | ("$derived", "by") | ("$effect", "pre" | "root" | "tracking") | ("$inspect", "with" | "trace")
+    )
+}
+
 /// Free functions / globals / types that exist without an import.
 pub fn is_builtin(family: LangFamily, name: &str) -> bool {
     match family {

@@ -200,6 +200,25 @@ fn run_kernel_big_stack(rel: &str, src: &str, lang: Lang, cfg: &ExtractConfig) -
     })
 }
 
+pub(crate) enum ScriptOutcome {
+    Ok { emit: EmitOut, facts: Box<Facts>, had_error_tree: bool, facts_failed: bool },
+    TimedOut,
+    Failed(String),
+}
+
+pub(crate) fn run_script_kernel(rel: &str, src: &str, lang: Lang, cfg: &ExtractConfig) -> ScriptOutcome {
+    let mut outcome = run_kernel(rel, src, lang, cfg);
+    if matches!(outcome, KernelOutcome::TooDeep) {
+        outcome = run_kernel_big_stack(rel, src, lang, cfg);
+    }
+    match outcome {
+        KernelOutcome::Ok { emit, facts, had_error_tree, facts_failed, .. } => ScriptOutcome::Ok { emit, facts, had_error_tree, facts_failed },
+        KernelOutcome::TooDeep => ScriptOutcome::Failed("nesting too deep for the walker".to_owned()),
+        KernelOutcome::TimedOut => ScriptOutcome::TimedOut,
+        KernelOutcome::Failed(m) => ScriptOutcome::Failed(m),
+    }
+}
+
 /// Extract one file. `None` when the file vanished or is unreadable.
 pub fn extract_one(entry: &FileEntry, cfg: &ExtractConfig) -> Option<FileBatch> {
     let bytes = std::fs::read(cfg.root.join(&entry.rel)).ok()?;
@@ -241,74 +260,87 @@ pub fn extract_bytes(rel: &str, bytes: &[u8], mtime_ns: i64, lang_hint: Lang, cf
         };
     }
     let mut errors = Vec::new();
-    // Macros the C++ grammar can't parse are blanked in place; see cpp_preparse.rs.
-    let src = if lang == Lang::Cpp { std::borrow::Cow::Owned(crate::cpp_preparse::pre_parse(&src, rel)) } else { src };
-    // Rust items inside conditional wrappers (`cfg_rt! { .. }`) are extracted from a
-    // position-preserving view with the wrapper tokens blanked; see macro_mask.rs. The
-    // original text is used again if blanking introduced syntax errors.
-    let mut mask = if lang == Lang::Rust { crate::macro_mask::rust_item_wrappers(&src, cfg.parse_timeout) } else { crate::macro_mask::Mask::None };
-    let mut mask_timed_out = false;
-    if matches!(mask, crate::macro_mask::Mask::Expired) {
-        mask_timed_out = true;
-        mask = crate::macro_mask::Mask::None;
-    }
-    let mut outcome = match &mask {
-        crate::macro_mask::Mask::Masked(m, _) => run_kernel(rel, m, lang, cfg),
-        _ => run_kernel(rel, &src, lang, cfg),
-    };
-    // blanking a non-item `cfg_*!` macro can introduce syntax errors: keep the mask only when
-    // the masked parse has no more error nodes than the original
-    if let (crate::macro_mask::Mask::Masked(_, original_errors), KernelOutcome::Ok { error_nodes, .. }) = (&mask, &outcome) {
-        if *error_nodes > *original_errors {
-            mask = crate::macro_mask::Mask::None;
-            outcome = run_kernel(rel, &src, lang, cfg);
+    let (emit, facts, src) = if matches!(lang, Lang::Vue | Lang::Svelte) {
+        let out = crate::sfc::extract_sfc(rel, &src, lang, cfg);
+        if out.had_error_tree {
+            flags |= fileflags::PARSE_ERROR;
         }
-    }
-    let src = match mask {
-        crate::macro_mask::Mask::Masked(m, _) => std::borrow::Cow::Owned(m),
-        _ => src,
-    };
-    if matches!(outcome, KernelOutcome::TooDeep) {
-        outcome = run_kernel_big_stack(rel, &src, lang, cfg);
-    }
-    let line_count = src.bytes().filter(|b| *b == b'\n').count() as u32 + 1;
-    let (emit, facts) = match outcome {
-        KernelOutcome::Ok { emit, facts, had_error_tree, facts_failed, .. } => {
-            if had_error_tree {
-                flags |= fileflags::PARSE_ERROR;
-            }
-            if facts_failed {
-                errors.push("panic while building facts".to_owned());
-            }
-            if facts.timed_out {
-                flags |= fileflags::TIMED_OUT;
-                errors.push(format!("supplementary facts parse timed out after {:?}", cfg.parse_timeout));
-            }
-            if mask_timed_out {
-                flags |= fileflags::TIMED_OUT;
-                errors.push(format!("conditional-wrapper pre-pass timed out after {:?}", cfg.parse_timeout));
-            }
-            (emit, *facts)
-        }
-        KernelOutcome::TooDeep => {
-            errors.push("nesting too deep for the walker".to_owned());
-            flags |= fileflags::PANICKED;
-            (file_node_only(rel, line_count), Facts::default())
-        }
-        KernelOutcome::TimedOut => {
-            errors.push(format!("parse timed out after {:?}", cfg.parse_timeout));
+        if out.timed_out {
             flags |= fileflags::TIMED_OUT;
-            (file_node_only(rel, line_count), Facts::default())
         }
-        KernelOutcome::Failed(m) => {
-            if m.starts_with("panic") {
-                flags |= fileflags::PANICKED;
-            } else {
-                flags |= fileflags::PARSE_ERROR;
+        errors.extend(out.errors);
+        (out.emit, out.facts, src)
+    } else {
+        // Macros the C++ grammar can't parse are blanked in place; see cpp_preparse.rs.
+        let src = if lang == Lang::Cpp { std::borrow::Cow::Owned(crate::cpp_preparse::pre_parse(&src, rel)) } else { src };
+        // Rust items inside conditional wrappers (`cfg_rt! { .. }`) are extracted from a
+        // position-preserving view with the wrapper tokens blanked; see macro_mask.rs. The
+        // original text is used again if blanking introduced syntax errors.
+        let mut mask = if lang == Lang::Rust { crate::macro_mask::rust_item_wrappers(&src, cfg.parse_timeout) } else { crate::macro_mask::Mask::None };
+        let mut mask_timed_out = false;
+        if matches!(mask, crate::macro_mask::Mask::Expired) {
+            mask_timed_out = true;
+            mask = crate::macro_mask::Mask::None;
+        }
+        let mut outcome = match &mask {
+            crate::macro_mask::Mask::Masked(m, _) => run_kernel(rel, m, lang, cfg),
+            _ => run_kernel(rel, &src, lang, cfg),
+        };
+        // blanking a non-item `cfg_*!` macro can introduce syntax errors: keep the mask only when
+        // the masked parse has no more error nodes than the original
+        if let (crate::macro_mask::Mask::Masked(_, original_errors), KernelOutcome::Ok { error_nodes, .. }) = (&mask, &outcome) {
+            if *error_nodes > *original_errors {
+                mask = crate::macro_mask::Mask::None;
+                outcome = run_kernel(rel, &src, lang, cfg);
             }
-            errors.push(m);
-            (file_node_only(rel, line_count), Facts::default())
         }
+        let src = match mask {
+            crate::macro_mask::Mask::Masked(m, _) => std::borrow::Cow::Owned(m),
+            _ => src,
+        };
+        if matches!(outcome, KernelOutcome::TooDeep) {
+            outcome = run_kernel_big_stack(rel, &src, lang, cfg);
+        }
+        let line_count = src.bytes().filter(|b| *b == b'\n').count() as u32 + 1;
+        let (emit, facts) = match outcome {
+            KernelOutcome::Ok { emit, facts, had_error_tree, facts_failed, .. } => {
+                if had_error_tree {
+                    flags |= fileflags::PARSE_ERROR;
+                }
+                if facts_failed {
+                    errors.push("panic while building facts".to_owned());
+                }
+                if facts.timed_out {
+                    flags |= fileflags::TIMED_OUT;
+                    errors.push(format!("supplementary facts parse timed out after {:?}", cfg.parse_timeout));
+                }
+                if mask_timed_out {
+                    flags |= fileflags::TIMED_OUT;
+                    errors.push(format!("conditional-wrapper pre-pass timed out after {:?}", cfg.parse_timeout));
+                }
+                (emit, *facts)
+            }
+            KernelOutcome::TooDeep => {
+                errors.push("nesting too deep for the walker".to_owned());
+                flags |= fileflags::PANICKED;
+                (file_node_only(rel, line_count), Facts::default())
+            }
+            KernelOutcome::TimedOut => {
+                errors.push(format!("parse timed out after {:?}", cfg.parse_timeout));
+                flags |= fileflags::TIMED_OUT;
+                (file_node_only(rel, line_count), Facts::default())
+            }
+            KernelOutcome::Failed(m) => {
+                if m.starts_with("panic") {
+                    flags |= fileflags::PANICKED;
+                } else {
+                    flags |= fileflags::PARSE_ERROR;
+                }
+                errors.push(m);
+                (file_node_only(rel, line_count), Facts::default())
+            }
+        };
+        (emit, facts, src)
     };
     let mut extra_refs = commonjs_require_refs(&src, lang);
     let (mut extra_nodes, mut sites) = (Vec::new(), Vec::new());

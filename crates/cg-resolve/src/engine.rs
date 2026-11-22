@@ -75,7 +75,13 @@ pub struct Engine<'v> {
 
 fn is_top_level(view: &View, n: NodeIdx) -> bool {
     match view.node(n).parent() {
-        Some(p) => view.hot(p).kind == NodeKind::File as u8,
+        Some(p) => {
+            let ph = view.hot(p);
+            ph.kind == NodeKind::File as u8
+                || (ph.kind == NodeKind::Component as u8
+                    && view.hot(n).kind != NodeKind::Method as u8
+                    && matches!(view.file(ph.file).lang(), Lang::Vue | Lang::Svelte))
+        }
         None => false,
     }
 }

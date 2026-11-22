@@ -49,6 +49,8 @@ pub fn hooks(project: &ProjectInfo) -> Vec<Arc<dyn FileHook>> {
             "spring" => Framework::Spring,
             "axum" => Framework::Axum,
             "next" => Framework::Next,
+            "nuxt" => Framework::Nuxt,
+            "sveltekit" => Framework::SvelteKit,
             "nestjs" => Framework::Nest,
             "react-router" => Framework::ReactRouter,
             "tanstack-router" => Framework::TanStack,

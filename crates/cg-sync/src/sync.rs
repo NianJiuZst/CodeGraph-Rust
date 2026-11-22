@@ -1048,12 +1048,19 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
         }
         if !file_hit {
             let check_receivers = !changed_receivers.is_empty();
-            let is_php_file = cg_core::Lang::from_u8(rec.lang) == cg_core::Lang::Php;
+            let file_lang = cg_core::Lang::from_u8(rec.lang);
+            let is_php_file = file_lang == cg_core::Lang::Php;
+            let is_svelte_file = file_lang == cg_core::Lang::Svelte;
             let check_php_ci = is_php_file && !php_tails_lower.is_empty();
             let check_php_includes = is_php_file && php_file_added;
             for i in 0..rec.ref_count {
                 let r = &base.p.refs[(rec.ref_start + i) as usize];
-                let by_tail = tail_ids.contains(&r.tail.0) || (check_php_ci && php_tails_lower.contains(&base.names.get(r.tail).to_ascii_lowercase()));
+                let by_tail = tail_ids.contains(&r.tail.0)
+                    || (check_php_ci && php_tails_lower.contains(&base.names.get(r.tail).to_ascii_lowercase()))
+                    || (is_svelte_file && {
+                        let t = base.names.get(r.tail);
+                        t.starts_with('$') && !t.starts_with("$$") && d_names.contains(&t[1..])
+                    });
                 let by_dead = r.status == status::RESOLVED && is_dead(r.target.0) && !remap.contains_key(&r.target.0);
                 let by_recv = check_receivers && {
                     let name = base.text.get(r.name);

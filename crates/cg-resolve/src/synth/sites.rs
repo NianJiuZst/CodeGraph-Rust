@@ -273,7 +273,7 @@ impl FileHook for SiteScanner {
                 }
             }
         }
-        if matches!(ctx.lang, Lang::Tsx | Lang::Jsx) || src.contains("</") || src.contains("/>") {
+        if !matches!(ctx.lang, Lang::Vue | Lang::Svelte) && (matches!(ctx.lang, Lang::Tsx | Lang::Jsx) || src.contains("</") || src.contains("/>")) {
             let mut seen: std::collections::HashSet<(u32, String)> = std::collections::HashSet::new();
             let jsx_kinds = [NodeKind::Function, NodeKind::Method, NodeKind::Component, NodeKind::Class, NodeKind::Variable, NodeKind::Constant];
             for m in jsx_re().captures_iter(src) {

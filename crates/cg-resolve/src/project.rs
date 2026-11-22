@@ -191,6 +191,12 @@ impl ProjectInfo {
         self.crates.iter().find(|c| c.dir.is_empty() || rel.starts_with(&format!("{}/", c.dir)))
     }
 
+    /// The nearest enclosing `package.json` governing a file, if any.
+    pub fn package_for(&self, rel: &str) -> Option<&PackageJson> {
+        let dir = parent_dir(rel);
+        self.packages.iter().filter(|p| p.dir.is_empty() || dir == p.dir || dir.starts_with(&format!("{}/", p.dir))).max_by_key(|p| p.dir.len())
+    }
+
     pub fn has_dep(&self, name: &str) -> bool {
         self.packages.iter().any(|p| p.deps.contains(name))
             || self.py_deps.contains(&name.to_ascii_lowercase())
@@ -209,6 +215,10 @@ impl ProjectInfo {
         add(npm("express"), "express");
         add(npm("react") || npm("react-dom"), "react");
         add(npm("next"), "next");
+        add(npm("vue"), "vue");
+        add(npm("nuxt") || npm("nuxt3") || npm("@nuxt/kit"), "nuxt");
+        add(npm("svelte"), "svelte");
+        add(npm("@sveltejs/kit"), "sveltekit");
         add(self.packages.iter().any(|p| p.deps.iter().any(|d| d.starts_with("@nestjs/"))), "nestjs");
         add(npm("react-router") || npm("react-router-dom") || npm("react-router-native"), "react-router");
         add(

@@ -168,6 +168,8 @@ pub enum Lang {
     R = 20,
     /// Detected by content in `.h` headers so they are not fed to the C walker; no walker.
     ObjC = 21,
+    Vue = 22,
+    Svelte = 23,
 }
 
 /// Languages whose symbols may reference one another by name (design doc 6.5: "same
@@ -213,6 +215,8 @@ impl Lang {
         Lang::Luau,
         Lang::R,
         Lang::ObjC,
+        Lang::Vue,
+        Lang::Svelte,
     ];
 
     /// Upstream `Language` string; also the kernel's language argument.
@@ -240,6 +244,8 @@ impl Lang {
             Lang::Luau => "luau",
             Lang::R => "r",
             Lang::ObjC => "objc",
+            Lang::Vue => "vue",
+            Lang::Svelte => "svelte",
         }
     }
 
@@ -256,7 +262,7 @@ impl Lang {
     }
 
     /// Whether this build has a walker for the language (MVP set, design doc 1.3 + D2,
-    /// plus the second-phase C/C++, C#, PHP, Ruby and Swift walkers).
+    /// plus C/C++, C#, PHP, Ruby, Swift, and Vue/Svelte SFC extraction).
     pub fn is_supported(self) -> bool {
         matches!(
             self,
@@ -264,6 +270,8 @@ impl Lang {
                 | Lang::Tsx
                 | Lang::JavaScript
                 | Lang::Jsx
+                | Lang::Vue
+                | Lang::Svelte
                 | Lang::Python
                 | Lang::Go
                 | Lang::Java
@@ -280,7 +288,7 @@ impl Lang {
 
     pub fn family(self) -> LangFamily {
         match self {
-            Lang::TypeScript | Lang::Tsx | Lang::JavaScript | Lang::Jsx => LangFamily::Js,
+            Lang::TypeScript | Lang::Tsx | Lang::JavaScript | Lang::Jsx | Lang::Vue | Lang::Svelte => LangFamily::Js,
             Lang::Python => LangFamily::Python,
             Lang::Go => LangFamily::Go,
             Lang::Java | Lang::Kotlin | Lang::Scala => LangFamily::Jvm,

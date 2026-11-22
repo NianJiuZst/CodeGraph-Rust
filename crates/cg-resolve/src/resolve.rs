@@ -576,7 +576,18 @@ impl<'e, 'v> FileCx<'e, 'v> {
     /// Kinds whose members are reached through the type: every type, and Ruby modules
     /// (`module Helpers; def halt; end; end`).
     fn holds_members(&self, k: NodeKind) -> bool {
-        k.is_type() || (self.family == LangFamily::Ruby && k == NodeKind::Module)
+        k.is_type() || (self.family == LangFamily::Ruby && k == NodeKind::Module) || (self.lang == Lang::Vue && k == NodeKind::Component)
+    }
+
+    fn is_svelte_rune_file(&self) -> bool {
+        if self.lang == Lang::Svelte {
+            return true;
+        }
+        if self.family == LangFamily::Js {
+            let p = self.view.file(self.file).path();
+            return p.ends_with(".svelte.ts") || p.ends_with(".svelte.js") || p.ends_with(".svelte.mts") || p.ends_with(".svelte.mjs");
+        }
+        false
     }
 
     /// Node of the class scope that corresponds to type node `t` (same start position).
@@ -2373,8 +2384,38 @@ impl<'e, 'v> FileCx<'e, 'v> {
             }
         }
         // 7. global name match
-        if is_builtin(self.family, name) || (self.lang == Lang::Cpp && crate::builtins::is_cpp_std_free_function(name)) {
+        if is_builtin(self.family, name)
+            || (self.lang == Lang::Cpp && crate::builtins::is_cpp_std_free_function(name))
+            || (self.lang == Lang::Vue && crate::builtins::is_vue_compiler_macro(name))
+            || (self.is_svelte_rune_file() && crate::builtins::is_svelte_rune(name))
+            || (self.family == LangFamily::Js
+                && crate::builtins::is_nuxt_auto_import(name)
+                && (self.lang == Lang::Vue || self.e.project.has_dep("nuxt") || self.e.project.has_dep("nuxt3") || self.e.project.has_dep("@nuxt/kit")))
+        {
             return NameRes::Builtin;
+        }
+        // Svelte `$store` auto-subscription: `$count` refers to the store `count`.
+        if self.lang == Lang::Svelte && name.starts_with('$') && !name.starts_with("$$") && name.len() > 1 {
+            let store = &name[1..];
+            if let Some(i) = self.visible_import(store, scope) {
+                if let Bound::Node(n) = e.bind_import(self.file, i as usize) {
+                    return NameRes::Found(n, by::IMPORT, 90);
+                }
+            }
+            if let Some(n) = view.by_name(store).find(|&n| view.hot(n).file == self.file && matches!(kind_of(view, n), NodeKind::Variable | NodeKind::Constant))
+            {
+                return NameRes::Found(n, by::LEXICAL, 90);
+            }
+            let mut global_stores = view.by_name(store).filter(|&n| {
+                let h = view.hot(n);
+                view.file(h.file).lang().family() == LangFamily::Js
+                    && matches!(kind_of(view, n), NodeKind::Variable | NodeKind::Constant)
+                    && self.visible(n, store)
+                    && !self.test_only(h.file)
+            });
+            if let (Some(n), None) = (global_stores.next(), global_stores.next()) {
+                return NameRes::Found(n, by::FRAMEWORK, 85);
+            }
         }
         if allow_global {
             return self.global_match(wcx, name, accept, bare_callable, args);
@@ -2871,7 +2912,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
             TypeRes::Builtin => return Outcome::st(status::BUILTIN),
             TypeRes::Unknown => {}
         }
-        if is_builtin(self.family, root) {
+        if is_builtin(self.family, root) || (self.is_svelte_rune_file() && path.is_empty() && crate::builtins::is_svelte_rune_member(root, method)) {
             return Outcome::st(status::BUILTIN);
         }
         // JS `window.SelectFilter = { init: .. }` in one script, `SelectFilter.init()` in another
@@ -3616,7 +3657,11 @@ impl<'e, 'v> FileCx<'e, 'v> {
             let h = view.hot(c);
             let k = NodeKind::from_u8(h.kind).unwrap_or(NodeKind::Variable);
             // stacked decorators and annotations sit between the route and its method
-            if h.file != self.file || !matches!(k, NodeKind::Method | NodeKind::Function) || h.start_line < r.line || h.start_line > r.line + 12 {
+            if h.file != self.file
+                || !matches!(k, NodeKind::Method | NodeKind::Function | NodeKind::Component)
+                || h.start_line < r.line
+                || h.start_line > r.line + 12
+            {
                 continue;
             }
             if after.is_none_or(|(l, n)| (h.start_line, c) < (l, n)) {

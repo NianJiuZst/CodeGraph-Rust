@@ -6,6 +6,7 @@ pub mod macro_mask;
 pub mod pipeline;
 pub mod post;
 pub mod rows;
+pub mod sfc;
 
 pub use facts::{BindKind, BindingFact, ExportFact, Facts, ImportFact, ImportKind, ScopeFact, ScopeKind};
 pub use pipeline::{

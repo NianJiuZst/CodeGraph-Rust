@@ -13,6 +13,8 @@ pub fn language_for_extension(ext: &str) -> Lang {
         ".tsx" => Lang::Tsx,
         ".js" | ".mjs" | ".cjs" | ".xsjs" | ".xsjslib" => Lang::JavaScript,
         ".jsx" => Lang::Jsx,
+        ".vue" => Lang::Vue,
+        ".svelte" => Lang::Svelte,
         ".py" | ".pyw" => Lang::Python,
         ".go" => Lang::Go,
         ".rs" => Lang::Rust,

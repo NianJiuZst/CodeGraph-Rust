@@ -652,9 +652,41 @@ impl<'v> Modules<'v> {
             }
         }
         let exts: &[&str] = if from_lang.is_typescript() {
-            &[".ts", ".tsx", ".d.ts", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js", "/index.jsx"]
+            &[".ts", ".tsx", ".d.ts", ".js", ".jsx", ".vue", ".svelte", "/index.ts", "/index.tsx", "/index.js", "/index.jsx", "/index.vue", "/index.svelte"]
+        } else if matches!(from_lang, Lang::Vue | Lang::Svelte) {
+            &[
+                ".ts",
+                ".tsx",
+                ".vue",
+                ".svelte",
+                ".js",
+                ".jsx",
+                ".mjs",
+                ".cjs",
+                "/index.ts",
+                "/index.tsx",
+                "/index.vue",
+                "/index.svelte",
+                "/index.js",
+                "/index.jsx",
+            ]
         } else {
-            &[".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", "/index.js", "/index.jsx", "/index.ts", "/index.tsx"]
+            &[
+                ".js",
+                ".jsx",
+                ".mjs",
+                ".cjs",
+                ".ts",
+                ".tsx",
+                ".vue",
+                ".svelte",
+                "/index.js",
+                "/index.jsx",
+                "/index.ts",
+                "/index.tsx",
+                "/index.vue",
+                "/index.svelte",
+            ]
         };
         for e in exts {
             if from_lang.family() == LangFamily::Js && !from_lang.is_typescript() && *e == ".d.ts" {
@@ -687,6 +719,32 @@ impl<'v> Modules<'v> {
                 None => ImportTarget::NotFound,
             };
         }
+        // Nuxt (`#imports`, `#components`, `#app`, `#build`, `#head`) and SvelteKit (`$app/*`, `$env/*`)
+        // framework virtual modules.
+        if matches!(spec, "#imports" | "#components" | "#app" | "#build" | "#head")
+            || spec.starts_with("#imports/")
+            || spec.starts_with("#components/")
+            || spec.starts_with("#app/")
+            || spec.starts_with("#build/")
+            || spec.starts_with("#head/")
+            || spec.starts_with("$app/")
+            || spec.starts_with("$env/")
+        {
+            return ImportTarget::External;
+        }
+        // SvelteKit `$lib/*` -> `<pkg>/src/lib/*` (or `src/lib/*`).
+        if let Some(rest) = spec.strip_prefix("$lib/") {
+            if let Some(pkg) = self.project.package_for(from_path) {
+                let base = if pkg.dir.is_empty() { format!("src/lib/{rest}") } else { format!("{}/src/lib/{rest}", pkg.dir) };
+                if let Some(f) = self.probe_js(&normalize(&base), from_lang) {
+                    return ImportTarget::File(f);
+                }
+            }
+            if let Some(f) = self.probe_js(&normalize(&format!("src/lib/{rest}")), from_lang) {
+                return ImportTarget::File(f);
+            }
+            return ImportTarget::NotFound;
+        }
         if let Some(tc) = self.project.tsconfig_for(from_path) {
             for (pat, targets) in &tc.paths {
                 let rest = match pat.find('*') {
@@ -711,6 +769,23 @@ impl<'v> Modules<'v> {
             }
             if let Some(b) = &tc.base_url {
                 if let Some(f) = self.probe_js(&normalize(&format!("{b}/{spec}")), from_lang) {
+                    return ImportTarget::File(f);
+                }
+            }
+        }
+        // Vue CLI / Vite / Nuxt conventional `@/` and `~/` aliases when not explicitly mapped in tsconfig.
+        if let Some(rest) = spec.strip_prefix("@/").or_else(|| spec.strip_prefix("~/")) {
+            let mut candidates: Vec<String> = Vec::with_capacity(4);
+            if let Some(pkg) = self.project.package_for(from_path) {
+                if !pkg.dir.is_empty() {
+                    candidates.push(format!("{}/src/{rest}", pkg.dir));
+                    candidates.push(format!("{}/{rest}", pkg.dir));
+                }
+            }
+            candidates.push(format!("src/{rest}"));
+            candidates.push(rest.to_owned());
+            for cand in candidates {
+                if let Some(f) = self.probe_js(&normalize(&cand), from_lang) {
                     return ImportTarget::File(f);
                 }
             }

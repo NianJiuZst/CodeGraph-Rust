@@ -19,6 +19,8 @@ pub enum Framework {
     Spring,
     Axum,
     Next,
+    Nuxt,
+    SvelteKit,
     Nest,
     ReactRouter,
     TanStack,
@@ -428,6 +430,77 @@ pub fn scan_axum(src: &str) -> Vec<Route> {
     out
 }
 
+/// Convert a Nuxt `pages/**/*.vue` file path to its route path (e.g. `pages/blog/[slug].vue` -> `/blog/:slug`).
+pub fn nuxt_page_route(rel: &str) -> Option<String> {
+    if !rel.ends_with(".vue") {
+        return None;
+    }
+    let norm = format!("/{rel}");
+    let idx = norm.find("/pages/")?;
+    let after = &norm[idx + "/pages/".len()..];
+    let stem = after.strip_suffix(".vue")?;
+    let mut segs: Vec<String> = Vec::new();
+    for seg in stem.split('/') {
+        if seg.is_empty() || seg == "index" {
+            continue;
+        }
+        let s = if let Some(inner) = seg.strip_prefix("[...").and_then(|x| x.strip_suffix(']')) {
+            format!("*{inner}")
+        } else if let Some(inner) = seg.strip_prefix("[[").and_then(|x| x.strip_suffix("]]")) {
+            format!(":{inner}?")
+        } else if let Some(inner) = seg.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
+            format!(":{inner}")
+        } else {
+            seg.to_owned()
+        };
+        segs.push(s);
+    }
+    Some(format!("/{}", segs.join("/")))
+}
+
+/// Convert a SvelteKit `routes/**/+page.svelte` file path to its route path (e.g. `src/routes/blog/[slug]/+page.svelte` -> `/blog/:slug`).
+pub fn sveltekit_page_route(rel: &str) -> Option<String> {
+    if rel.rsplit('/').next() != Some("+page.svelte") {
+        return None;
+    }
+    let norm = format!("/{rel}");
+    let idx = norm.find("/routes/")?;
+    let after = &norm[idx + "/routes/".len()..];
+    let dir = after.rsplit_once('/').map_or("", |(d, _)| d);
+    let mut segs: Vec<String> = Vec::new();
+    for seg in dir.split('/') {
+        if seg.is_empty() || (seg.starts_with('(') && seg.ends_with(')')) {
+            continue;
+        }
+        fn strip_matcher(x: &str) -> &str {
+            x.split('=').next().unwrap_or(x)
+        }
+        let s = if let Some(inner) = seg.strip_prefix("[...").and_then(|x| x.strip_suffix(']')) {
+            format!("*{}", strip_matcher(inner))
+        } else if let Some(inner) = seg.strip_prefix("[[").and_then(|x| x.strip_suffix("]]")) {
+            format!(":{}?", strip_matcher(inner))
+        } else if let Some(inner) = seg.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
+            format!(":{}", strip_matcher(inner))
+        } else {
+            seg.to_owned()
+        };
+        segs.push(s);
+    }
+    Some(format!("/{}", segs.join("/")))
+}
+
+fn scan_sfc_page(rel: &str, path: String, router: &'static str, ext: &str) -> Vec<Route> {
+    let comp = rel.rsplit('/').next().unwrap_or(rel).strip_suffix(ext).unwrap_or(rel);
+    vec![Route {
+        method: String::new(),
+        path,
+        line: 1,
+        handlers: vec![Handler { name: comp.to_owned(), line: 1, col: 0 }],
+        ref_kind: RefKind::Edge(cg_core::EdgeKind::Calls),
+        router: Some(router),
+    }]
+}
+
 pub fn scan(fw: Framework, lang: Lang, rel: &str, src: &str) -> Vec<Route> {
     // Framework repositories contain route examples in API comments. Those
     // snippets are documentation, not registrations in the program's graph.
@@ -452,6 +525,8 @@ pub fn scan(fw: Framework, lang: Lang, rel: &str, src: &str) -> Vec<Route> {
         Framework::Spring => scan_spring(src, lang == Lang::Kotlin),
         Framework::Axum => scan_axum(src),
         Framework::Next => super::jsroutes::scan_next(rel, src),
+        Framework::Nuxt => nuxt_page_route(rel).map_or_else(Vec::new, |p| scan_sfc_page(rel, p, "nuxt", ".vue")),
+        Framework::SvelteKit => sveltekit_page_route(rel).map_or_else(Vec::new, |p| scan_sfc_page(rel, p, "sveltekit", ".svelte")),
         Framework::Nest => super::jsroutes::scan_nest(src),
         Framework::ReactRouter => super::jsroutes::scan_react_router(rel, src),
         Framework::TanStack => super::jsroutes::scan_tanstack(rel, src),
@@ -473,6 +548,8 @@ impl FileHook for RouteHook {
             Framework::Spring => "spring-routes",
             Framework::Axum => "axum-routes",
             Framework::Next => "next-routes",
+            Framework::Nuxt => "nuxt-routes",
+            Framework::SvelteKit => "sveltekit-routes",
             Framework::Nest => "nest-routes",
             Framework::ReactRouter => "react-router-routes",
             Framework::TanStack => "tanstack-router-routes",
@@ -481,6 +558,8 @@ impl FileHook for RouteHook {
     fn applies(&self, lang: Lang, rel: &str) -> bool {
         match self.fw {
             Framework::Next => lang.family() == LangFamily::Js && super::jsroutes::next_route_of(rel).is_some(),
+            Framework::Nuxt => lang == Lang::Vue && nuxt_page_route(rel).is_some(),
+            Framework::SvelteKit => lang == Lang::Svelte && sveltekit_page_route(rel).is_some(),
             Framework::Express | Framework::Nest | Framework::ReactRouter | Framework::TanStack => lang.family() == LangFamily::Js,
             Framework::Flask | Framework::FastApi | Framework::Django => lang == Lang::Python,
             Framework::Gin => lang == Lang::Go,
@@ -496,7 +575,7 @@ impl FileHook for RouteHook {
             Framework::Gin => &[".GET(", ".POST(", ".PUT(", ".DELETE(", ".PATCH(", ".Any(", ".OPTIONS(", ".HEAD("],
             Framework::Spring => &["Mapping"],
             Framework::Axum => &[".route("],
-            Framework::Next => &[],
+            Framework::Next | Framework::Nuxt | Framework::SvelteKit => &[],
             Framework::Nest => &[
                 "@Get",
                 "@Post",

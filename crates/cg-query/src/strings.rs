@@ -39,7 +39,7 @@ Codegraph is a memory-mapped knowledge graph of every symbol, edge, and file in
 the workspace — pre-computed structure you would otherwise re-derive by
 reading files (cached intelligence: thousands of parse/trace decisions you
 don't pay to re-reason each run). This build indexes TypeScript/JavaScript
-(including TSX/JSX), Python, Go, Rust, Java, Kotlin, C/C++, C#, PHP, Ruby,
+(including TSX/JSX), Vue, Svelte, Python, Go, Rust, Java, Kotlin, C/C++, C#, PHP, Ruby,
 and Swift. Reads are
 sub-millisecond; the index lags writes by ~1s through the file watcher. Reach for it BEFORE *and* while
 writing or editing code — not just for questions: one call returns the
@@ -96,7 +96,7 @@ calls; a grep/read exploration is dozens.
 const SERVER_INSTRUCTIONS_NO_ROOT_INDEX: &str = r#"# Codegraph — available (per-project; pass projectPath)
 
 Codegraph is a knowledge graph of a codebase's symbols, edges, and
-files (TypeScript/JavaScript including TSX/JSX, Python, Go, Rust, Java, Kotlin,
+files (TypeScript/JavaScript including TSX/JSX, Vue, Svelte, Python, Go, Rust, Java, Kotlin,
 C/C++, C#, PHP, Ruby, and Swift): one `codegraph_explore` call returns the verbatim, line-numbered source
 of the relevant symbols PLUS the call paths between them and a blast-radius
 summary — replacing a grep + Read loop with one round-trip.
