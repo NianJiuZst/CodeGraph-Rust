@@ -321,23 +321,63 @@ fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Mask HTML comments `<!-- ... -->` with spaces, preserving newlines and byte offsets.
+/// Mask HTML comments `<!-- ... -->` outside `<script>` and `<style>` raw-text blocks,
+/// preserving newlines and byte offsets so JS/TS strings containing `'<!--'` are untouched.
 fn mask_html_comments(src: &str) -> String {
     let b = src.as_bytes();
     let mut out = b.to_vec();
     let mut i = 0;
-    while i + 3 < b.len() {
-        if &b[i..i + 4] == b"<!--" {
-            let end = find_bytes(&b[i + 4..], b"-->").map_or(b.len(), |k| i + 4 + k + 3);
-            for ch in &mut out[i..end] {
-                if *ch != b'\n' && *ch != b'\r' {
-                    *ch = b' ';
+    while i < b.len() {
+        if b[i] == b'<' {
+            if i + 4 <= b.len() && &b[i..i + 4] == b"<!--" {
+                let end = find_bytes(&b[i + 4..], b"-->").map_or(b.len(), |k| i + 4 + k + 3);
+                for ch in &mut out[i..end] {
+                    if *ch != b'\n' && *ch != b'\r' {
+                        *ch = b' ';
+                    }
+                }
+                i = end;
+                continue;
+            }
+            // Skip raw-text `<script ...>...</script>` and `<style ...>...</style>` bodies.
+            let raw_tag: Option<&[u8]> = if i + 7 <= b.len() && b[i + 1..i + 7].eq_ignore_ascii_case(b"script") {
+                Some(b"script")
+            } else if i + 6 <= b.len() && b[i + 1..i + 6].eq_ignore_ascii_case(b"style") {
+                Some(b"style")
+            } else {
+                None
+            };
+            if let Some(tag) = raw_tag {
+                let after = i + 1 + tag.len();
+                let boundary = after == b.len() || matches!(b[after], b'>' | b'/' | b' ' | b'\t' | b'\r' | b'\n');
+                if boundary {
+                    if let Some((gt, self_closing)) = scan_open_tag_end(b, i) {
+                        if self_closing {
+                            i = gt + 1;
+                            continue;
+                        }
+                        let mut j = gt + 1;
+                        let mut closed = b.len();
+                        while j + 2 + tag.len() < b.len() {
+                            if b[j] == b'<' && b[j + 1] == b'/' && b[j + 2..j + 2 + tag.len()].eq_ignore_ascii_case(tag) {
+                                let mut k = j + 2 + tag.len();
+                                while k < b.len() && b[k].is_ascii_whitespace() {
+                                    k += 1;
+                                }
+                                if k < b.len() && b[k] == b'>' {
+                                    closed = k + 1;
+                                    break;
+                                }
+                            }
+                            j += 1;
+                        }
+                        i = closed;
+                        continue;
+                    }
                 }
             }
-            i = end;
-        } else {
-            i += 1;
         }
+        i += 1;
     }
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }

@@ -283,3 +283,29 @@ function handleClick() {
     // No spurious React JSX edges synthesized on SFC files
     lacks(&edges, "src/routes/posts/[id=integer]/+page.svelte::+page -calls-> src/lib/Badge.svelte::Badge");
 }
+
+#[test]
+fn sfc_script_html_comment_literal_and_tsconfig_lib_override() {
+    let (_dir, view) = project(&[
+        ("tsconfig.json", r#"{ "compilerOptions": { "paths": { "$lib/*": ["shared/*"] } } }"#),
+        ("shared/api.ts", "export function loadData() { return 1; }\n"),
+        ("src/lib/api.ts", "export function wrongData() { return 2; }\n"),
+        (
+            "src/Page.svelte",
+            r#"<script lang="ts">
+import { loadData } from '$lib/api';
+const marker = '<!-- not an html comment';
+export function init() { return loadData() + marker.length; }
+</script>
+<!-- real comment -->
+<p>{init()}</p>
+"#,
+        ),
+    ]);
+    let edges = dump::dump_edges(&view);
+    // Explicit tsconfig `$lib/* -> shared/*` must win over SvelteKit's default `src/lib/*`.
+    has(&edges, "src/Page.svelte -imports-> shared/api.ts");
+    lacks(&edges, "src/Page.svelte -imports-> src/lib/api.ts");
+    // Script block containing `'<!--'` string literal must remain intact and resolve calls.
+    has(&edges, "src/Page.svelte::init -calls-> shared/api.ts::loadData");
+}

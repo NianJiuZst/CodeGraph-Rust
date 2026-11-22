@@ -435,17 +435,49 @@ pub fn build_draft_at(batches: &[FileBatch], delta: Option<(&[FileId], BuildBase
         });
 
         // ---- references ----
-        let mut call_names = rustc_hash::FxHashMap::default();
+        enum CallNameEntry<'a> {
+            One(&'a str),
+            /// Chained calls repeating the same tail at one `(line, col)` (`a.fetch().next().next()`):
+            /// kept in AST pre-order (outermost first), matching kernel reference emission order.
+            Chain(std::collections::VecDeque<&'a str>),
+            Ambiguous,
+        }
+        let mut call_names: rustc_hash::FxHashMap<(u32, u32, &str), CallNameEntry<'_>> = rustc_hash::FxHashMap::default();
         for call in &b.facts.call_names {
-            for key in [call.tail.as_str(), call.kernel_name.as_str()] {
+            let keys: [&str; 2] = [call.tail.as_str(), call.kernel_name.as_str()];
+            let n_keys = if keys[0] == keys[1] { 1 } else { 2 };
+            for &key in &keys[..n_keys] {
                 call_names
                     .entry((call.line, call.col, key))
-                    .and_modify(|name: &mut Option<&str>| {
-                        if *name != Some(call.name.as_str()) {
-                            *name = None;
+                    .and_modify(|entry| match entry {
+                        CallNameEntry::One(prev) if *prev == call.name.as_str() => {}
+                        CallNameEntry::One(prev) => {
+                            let (short, long) = if prev.len() <= call.name.len() { (*prev, call.name.as_str()) } else { (call.name.as_str(), *prev) };
+                            if long.starts_with(short) && long[short.len()..].starts_with("().") && long.rsplit('.').next() == Some(call.tail.as_str()) {
+                                let mut q = std::collections::VecDeque::with_capacity(2);
+                                q.push_back(*prev);
+                                q.push_back(call.name.as_str());
+                                *entry = CallNameEntry::Chain(q);
+                            } else {
+                                *entry = CallNameEntry::Ambiguous;
+                            }
                         }
+                        CallNameEntry::Chain(q) => {
+                            if let Some(&last) = q.back() {
+                                if last == call.name.as_str() {
+                                    return;
+                                }
+                                let (short, long) = if last.len() <= call.name.len() { (last, call.name.as_str()) } else { (call.name.as_str(), last) };
+                                if long.starts_with(short) && long[short.len()..].starts_with("().") && long.rsplit('.').next() == Some(call.tail.as_str()) {
+                                    q.push_back(call.name.as_str());
+                                } else {
+                                    *entry = CallNameEntry::Ambiguous;
+                                }
+                            }
+                        }
+                        CallNameEntry::Ambiguous => {}
                     })
-                    .or_insert(Some(call.name.as_str()));
+                    .or_insert(CallNameEntry::One(call.name.as_str()));
             }
         }
         // Argument shapes ride on the call reference as its candidate list (the kernel gives
@@ -469,7 +501,15 @@ pub fn build_draft_at(batches: &[FileBatch], delta: Option<(&[FileId], BuildBase
             // path writes it
             let renamed =
                 is_call || (matches!(b.lang.family(), cg_core::LangFamily::Rust | cg_core::LangFamily::Js) && r.kind() == RefKind::Edge(EdgeKind::References));
-            let name = if renamed { call_names.get(&(r.line(), r.col(), r.name())).copied().flatten().unwrap_or_else(|| r.name()) } else { r.name() };
+            let name = if renamed {
+                match call_names.get_mut(&(r.line(), r.col(), r.name())) {
+                    Some(CallNameEntry::One(s)) => *s,
+                    Some(CallNameEntry::Chain(q)) => q.pop_front().unwrap_or_else(|| r.name()),
+                    _ => r.name(),
+                }
+            } else {
+                r.name()
+            };
             let args = if is_call && r.candidates().is_none() {
                 call_args.get(&(r.line(), r.col(), tail_of(name))).copied().flatten().map(|call| {
                     let mut joined = String::from(cg_extract::facts::args::ARGS_MARK);

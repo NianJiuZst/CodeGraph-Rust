@@ -213,6 +213,31 @@ fn kotlin_shape(cx: &Cx, a: Node) -> String {
             Some(t) => typed(cx.text(t).trim_end_matches('?')),
             None => "?".into(),
         },
+        "object_literal" => {
+            let sup = super::kotlin::object_literal_super(cx, a);
+            if sup.is_empty() {
+                "?".into()
+            } else {
+                typed(&sup)
+            }
+        }
+        "call_expression" => match a.named_child(0) {
+            Some(c) if c.kind() == "simple_identifier" && cx.text(c).starts_with(|ch: char| ch.is_ascii_uppercase()) => typed(cx.text(c)),
+            Some(c) if c.kind() == "navigation_expression" => {
+                let tail = kids(c)
+                    .filter(|k| k.kind() == "navigation_suffix")
+                    .last()
+                    .and_then(|s| kids(s).find(|k| k.kind() == "simple_identifier"))
+                    .map(|k| cx.text(k))
+                    .unwrap_or("");
+                if tail.starts_with(|ch: char| ch.is_ascii_uppercase()) {
+                    typed(tail)
+                } else {
+                    "?".into()
+                }
+            }
+            _ => "?".into(),
+        },
         "prefix_expression" if text.starts_with(['-', '+']) => match a.named_child(a.named_child_count().saturating_sub(1)) {
             Some(o) if o.kind().ends_with("literal") => kotlin_shape(cx, o),
             _ => "?".into(),

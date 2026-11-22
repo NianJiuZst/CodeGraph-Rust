@@ -732,19 +732,6 @@ impl<'v> Modules<'v> {
         {
             return ImportTarget::External;
         }
-        // SvelteKit `$lib/*` -> `<pkg>/src/lib/*` (or `src/lib/*`).
-        if let Some(rest) = spec.strip_prefix("$lib/") {
-            if let Some(pkg) = self.project.package_for(from_path) {
-                let base = if pkg.dir.is_empty() { format!("src/lib/{rest}") } else { format!("{}/src/lib/{rest}", pkg.dir) };
-                if let Some(f) = self.probe_js(&normalize(&base), from_lang) {
-                    return ImportTarget::File(f);
-                }
-            }
-            if let Some(f) = self.probe_js(&normalize(&format!("src/lib/{rest}")), from_lang) {
-                return ImportTarget::File(f);
-            }
-            return ImportTarget::NotFound;
-        }
         if let Some(tc) = self.project.tsconfig_for(from_path) {
             for (pat, targets) in &tc.paths {
                 let rest = match pat.find('*') {
@@ -772,6 +759,19 @@ impl<'v> Modules<'v> {
                     return ImportTarget::File(f);
                 }
             }
+        }
+        // SvelteKit `$lib/*` -> `<pkg>/src/lib/*` (or `src/lib/*`) when not explicitly mapped in tsconfig.
+        if let Some(rest) = spec.strip_prefix("$lib/") {
+            if let Some(pkg) = self.project.package_for(from_path) {
+                let base = if pkg.dir.is_empty() { format!("src/lib/{rest}") } else { format!("{}/src/lib/{rest}", pkg.dir) };
+                if let Some(f) = self.probe_js(&normalize(&base), from_lang) {
+                    return ImportTarget::File(f);
+                }
+            }
+            if let Some(f) = self.probe_js(&normalize(&format!("src/lib/{rest}")), from_lang) {
+                return ImportTarget::File(f);
+            }
+            return ImportTarget::NotFound;
         }
         // Vue CLI / Vite / Nuxt conventional `@/` and `~/` aliases when not explicitly mapped in tsconfig.
         if let Some(rest) = spec.strip_prefix("@/").or_else(|| spec.strip_prefix("~/")) {
@@ -911,13 +911,57 @@ impl<'v> Modules<'v> {
 
     // ---- Java / Kotlin
     fn resolve_jvm(&self, spec: &str, from_path: &str) -> ImportTarget {
-        let segs: Vec<&str> = spec.split('.').collect();
+        let raw_segs: Vec<&str> = spec.split('.').collect();
+        // Kotlin `import okhttp3.Headers.Companion.headersOf`: companion members live directly
+        // under the enclosing class in the kernel.
+        let segs: Vec<&str> = raw_segs.iter().copied().filter(|&s| s != "Companion").collect();
+        let affinity = |n: &NodeIdx| {
+            let node = self.view.node(*n);
+            let p = self.view.file(self.view.hot(*n).file).path();
+            (path_affinity(p, from_path), std::cmp::Reverse(p), std::cmp::Reverse(node.start_line()), std::cmp::Reverse(node.start_col()))
+        };
         for i in (1..segs.len()).rev() {
             let qname = format!("{}::{}", segs[..i].join("."), segs[i..].join("::"));
             // one class copied into several source roots: the importer's own root
-            let affinity = |n: &NodeIdx| (path_affinity(self.view.file(self.view.hot(*n).file).path(), from_path), std::cmp::Reverse(n.0));
             if let Some(n) = self.view.by_qname(&qname).max_by_key(affinity) {
                 return ImportTarget::Node(n);
+            }
+        }
+        // Kotlin extension functions (`fun String.toHttpUrl()`, `fun Closeable.closeQuietly()`) have
+        // `qname = "Receiver::fn"` instead of `pkg::fn` / `pkg::Class::fn`.
+        if let Some((&last, prefix)) = segs.split_last() {
+            if !prefix.is_empty() {
+                for i in (1..prefix.len()).rev() {
+                    let owner_q = format!("{}::{}", prefix[..i].join("."), prefix[i..].join("::"));
+                    if let Some(owner) = self.view.by_qname(&owner_q).max_by_key(affinity) {
+                        if let Some(m) = self
+                            .view
+                            .by_name(last)
+                            .filter(|&n| self.view.node(n).parent() == Some(owner) && self.view.file(self.view.hot(n).file).lang() == Lang::Kotlin)
+                            .max_by_key(affinity)
+                        {
+                            return ImportTarget::Node(m);
+                        }
+                    }
+                }
+                let pkg_key = prefix.join(".");
+                if let Some(&pkg) = self.pkg_by_key.get(pkg_key.as_str()) {
+                    if let Some(m) = self
+                        .view
+                        .by_name(last)
+                        .filter(|&n| {
+                            let f = self.view.hot(n).file;
+                            self.view.file(f).lang() == Lang::Kotlin
+                                && self.pkg_of(f) == pkg
+                                && self.view.node(n).parent().is_none_or(|p| {
+                                    matches!(cg_core::NodeKind::from_u8(self.view.hot(p).kind), Some(cg_core::NodeKind::File | cg_core::NodeKind::Namespace))
+                                })
+                        })
+                        .max_by_key(affinity)
+                    {
+                        return ImportTarget::Node(m);
+                    }
+                }
             }
         }
         // whole package (wildcard import)

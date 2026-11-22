@@ -140,8 +140,8 @@ const QUESTION_WORDS: &[&str] = &[
 ];
 
 const PATH_EXTS: &[&str] = &[
-    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rs", ".java", ".kt", ".kts", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".php", ".rb",
-    ".swift", ".json", ".toml", ".yaml", ".yml", ".md",
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte", ".py", ".go", ".rs", ".java", ".kt", ".kts", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs",
+    ".php", ".rb", ".swift", ".json", ".toml", ".yaml", ".yml", ".md",
 ];
 
 fn is_question_word(tok: &str) -> bool {

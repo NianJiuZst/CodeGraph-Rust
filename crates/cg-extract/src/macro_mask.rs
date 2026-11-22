@@ -26,7 +26,8 @@ pub enum Mask {
 }
 
 fn wrapper(name: &str) -> bool {
-    name.starts_with("cfg_") && name != "cfg_if" && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    let leaf = name.rsplit("::").next().unwrap_or(name);
+    leaf == "pin_project" || (leaf.starts_with("cfg_") && leaf != "cfg_if" && leaf.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'))
 }
 
 fn collect(n: Node, src: &str, ranges: &mut Vec<(usize, usize)>, depth: usize) {
@@ -69,7 +70,7 @@ fn collect(n: Node, src: &str, ranges: &mut Vec<(usize, usize)>, depth: usize) {
 /// Byte ranges to blank for the wrappers found in `tree` (empty when there are none).
 pub fn wrapper_ranges(tree: &Tree, src: &str) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
-    if src.contains("cfg_") {
+    if src.contains("cfg_") || src.contains("pin_project") {
         collect(tree.root_node(), src, &mut ranges, 0);
     }
     ranges
@@ -119,10 +120,23 @@ pub fn error_nodes(tree: &Tree) -> usize {
     count
 }
 
-/// Fast linear scan: does `src` contain a `cfg_<ident>! {` candidate (excluding `cfg_if!`)?
-/// Avoids parsing files that only mention `cfg_attr`, `cfg_if!`, or identifiers containing `cfg_`.
-fn has_cfg_wrapper_candidate(src: &str) -> bool {
+/// Fast linear scan: does `src` contain a `cfg_<ident>! {` (excluding `cfg_if!`) or `pin_project! {` candidate?
+/// Avoids parsing files that only mention `cfg_attr`, `cfg_if!`, or unrelated identifiers.
+fn has_wrapper_candidate(src: &str) -> bool {
     let bytes = src.as_bytes();
+    let follows_bang_brace = |mut j: usize| -> bool {
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j < bytes.len() && bytes[j] == b'!' {
+            j += 1;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            return j < bytes.len() && bytes[j] == b'{';
+        }
+        false
+    };
     let mut pos = 0;
     while let Some(off) = memchr::memmem::find(&bytes[pos..], b"cfg_") {
         let start = pos + off;
@@ -131,22 +145,20 @@ fn has_cfg_wrapper_candidate(src: &str) -> bool {
         while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
             i += 1;
         }
-        if !prev_ident && &bytes[start..i] != b"cfg_if" {
-            let mut j = i;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b'!' {
-                j += 1;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'{' {
-                    return true;
-                }
-            }
+        if !prev_ident && &bytes[start..i] != b"cfg_if" && follows_bang_brace(i) {
+            return true;
         }
         pos = i;
+    }
+    pos = 0;
+    while let Some(off) = memchr::memmem::find(&bytes[pos..], b"pin_project") {
+        let start = pos + off;
+        let prev_ident = start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+        let end = start + b"pin_project".len();
+        if !prev_ident && follows_bang_brace(end) {
+            return true;
+        }
+        pos = end;
     }
     false
 }
@@ -157,7 +169,7 @@ thread_local! {
 
 /// The masked view of a Rust source (see the module docs).
 pub fn rust_item_wrappers(src: &str, timeout: Duration) -> Mask {
-    if src.len() > MAX_BYTES || !has_cfg_wrapper_candidate(src) {
+    if src.len() > MAX_BYTES || !has_wrapper_candidate(src) {
         return Mask::None;
     }
     if timeout.is_zero() {

@@ -53,6 +53,8 @@ pub struct Engine<'v> {
     mro: FxHashMap<NodeIdx, Vec<NodeIdx>>,
     /// Rust methods of `impl Trait for X` blocks: an inherent `X::m` shadows them.
     trait_methods: rustc_hash::FxHashSet<NodeIdx>,
+    /// Rust blanket extension trait bounds (`impl<T: Base> ExtTrait for T {}`): `ExtTrait` -> `[Base]`.
+    pub blanket_traits: FxHashMap<&'v str, SmallVec<[&'v str; 2]>>,
     /// C++ namespaces opened by a `#define` anywhere in the project.
     pub macro_namespaces: rustc_hash::FxHashSet<&'v str>,
     /// JavaScript functions with syntax evidence that they implement an object member.
@@ -69,8 +71,24 @@ pub struct Engine<'v> {
     pub fixtures: FxHashMap<&'v str, SmallVec<[(FileId, &'v cg_store::BindingRec); 1]>>,
     /// Rust `type X = Y;` targets by the alias's node.
     pub type_aliases: FxHashMap<NodeIdx, &'v cg_store::BindingRec>,
-    pub django_model: Option<NodeIdx>,
+    pub django: DjangoRuntime,
     pub n_files: usize,
+}
+
+/// Core Django runtime classes/proxies discovered by exact module path when the repo uses or is
+/// Django. Every slot is `None` in non-Django projects.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DjangoRuntime {
+    pub model: Option<NodeIdx>,
+    pub queryset: Option<NodeIdx>,
+    pub db_conn: Option<NodeIdx>,
+    pub db_wrapper: Option<NodeIdx>,
+    pub schema_editor: Option<NodeIdx>,
+    pub cursor: Option<NodeIdx>,
+    pub cache: Option<NodeIdx>,
+    pub base_cache: Option<NodeIdx>,
+    pub conn_handler: Option<NodeIdx>,
+    pub cache_handler: Option<NodeIdx>,
 }
 
 fn is_top_level(view: &View, n: NodeIdx) -> bool {
@@ -155,6 +173,27 @@ impl<'v> Engine<'v> {
                 .filter(|b| b.kind == BindKind::TraitImpl as u8 && b.node.is_some())
                 .map(|b| b.node)
                 .collect(),
+            blanket_traits: {
+                let mut m: FxHashMap<&'v str, SmallVec<[&'v str; 2]>> = FxHashMap::default();
+                for &f in &files {
+                    if view.file(f).lang() != Lang::Rust {
+                        continue;
+                    }
+                    for b in view.bindings_of(f) {
+                        if b.kind == BindKind::TraitImpl as u8 && b.node.is_none() {
+                            let tr = view.text_str(b.name);
+                            let base = view.text_str(b.decl_type);
+                            if !tr.is_empty() && !base.is_empty() {
+                                let list = m.entry(tr).or_default();
+                                if !list.contains(&base) {
+                                    list.push(base);
+                                }
+                            }
+                        }
+                    }
+                }
+                m
+            },
             macro_namespaces: files
                 .iter()
                 .filter(|f| view.file(**f).lang() == Lang::Cpp)
@@ -197,18 +236,32 @@ impl<'v> Engine<'v> {
                 .filter(|b| b.kind == BindKind::TypeAlias as u8 && b.node.is_some())
                 .map(|b| (b.node, b))
                 .collect(),
-            django_model: None,
+            django: DjangoRuntime::default(),
             n_files,
         };
         e.build_exports(&files);
         e.build_prototypes(&files);
         if project.py_deps.contains("django") {
             if let Some(f) = files.iter().copied().find(|f| view.file(*f).lang() == Lang::Python) {
-                if let ImportTarget::File(base) = e.modules.resolve_import(Lang::Python, "django.db.models.base", f) {
-                    if let Some(Bound::Node(n)) = e.lookup_export(base, "Model", 0) {
-                        e.django_model = Some(n);
+                let lookup = |mod_path: &str, sym: &str| -> Option<NodeIdx> {
+                    let ImportTarget::File(file) = e.modules.resolve_import(Lang::Python, mod_path, f) else { return None };
+                    match e.lookup_export(file, sym, 0) {
+                        Some(Bound::Node(n)) => Some(n),
+                        _ => None,
                     }
-                }
+                };
+                e.django = DjangoRuntime {
+                    model: lookup("django.db.models.base", "Model"),
+                    queryset: lookup("django.db.models.query", "QuerySet"),
+                    db_conn: lookup("django.db", "connection"),
+                    db_wrapper: lookup("django.db.backends.base.base", "BaseDatabaseWrapper"),
+                    schema_editor: lookup("django.db.backends.base.schema", "BaseDatabaseSchemaEditor"),
+                    cursor: lookup("django.db.backends.utils", "CursorWrapper"),
+                    cache: lookup("django.core.cache", "cache"),
+                    base_cache: lookup("django.core.cache.backends.base", "BaseCache"),
+                    conn_handler: lookup("django.db.utils", "ConnectionHandler"),
+                    cache_handler: lookup("django.core.cache", "CacheHandler"),
+                };
             }
         }
         e.build_pkg_defs(&files);
@@ -754,12 +807,19 @@ impl<'v> Engine<'v> {
         let tn = self.view.node(t);
         // Rust: an inherent method shadows a trait's, wherever either impl is written
         let mut of_trait = None;
+        let mut non_callable = None;
         let mut php_ci = None;
         let is_php = self.view.file(tn.file()).lang().family() == LangFamily::Php;
         for e in self.view.out_edges(t) {
             if e.kind == EdgeKind::Contains {
                 let c = self.view.node(e.dst);
                 if c.name() == name && c.kind() != NodeKind::File {
+                    // Builders and structs often hold a field and a method of the same name
+                    // (`var dns: Dns` + `fun dns(dns: Dns)`): prefer methods/types over fields.
+                    if matches!(c.kind(), NodeKind::Field | NodeKind::Property | NodeKind::Variable | NodeKind::Constant) {
+                        non_callable.get_or_insert(e.dst);
+                        continue;
+                    }
                     if !self.trait_methods.contains(&e.dst) {
                         return Some(e.dst);
                     }
@@ -784,6 +844,11 @@ impl<'v> Engine<'v> {
             // Go: same package; Rust: the owning module or a proved type import.
             if cf == tfile || (!tpkg.is_none() && self.modules.pkg_of(cf) == tpkg) || self.rust_type_owner(t, cf) {
                 if family != LangFamily::Rust {
+                    let k = NodeKind::from_u8(self.view.hot(cand).kind).unwrap_or(NodeKind::Variable);
+                    if matches!(k, NodeKind::Field | NodeKind::Property | NodeKind::Variable | NodeKind::Constant) {
+                        non_callable.get_or_insert(cand);
+                        continue;
+                    }
                     return Some(cand);
                 }
                 owned.push(cand);
@@ -796,12 +861,14 @@ impl<'v> Engine<'v> {
         // a base/delta split cannot decide
         let by_place = owned.into_iter().min_by_key(|c| {
             let h = self.view.hot(*c);
-            (self.trait_methods.contains(c), self.view.file(h.file).path(), self.view.node(*c).start_line())
+            let k = NodeKind::from_u8(h.kind).unwrap_or(NodeKind::Variable);
+            let is_field = matches!(k, NodeKind::Field | NodeKind::Property | NodeKind::Variable | NodeKind::Constant);
+            (is_field, self.trait_methods.contains(c), self.view.file(h.file).path(), self.view.node(*c).start_line())
         });
         if let Some(m) = by_place.or(of_trait) {
             return Some(m);
         }
-        match family {
+        let found = match family {
             // Java/Kotlin nested types (pre-existing behaviour), then a Kotlin extension function
             LangFamily::Jvm => best.filter(|_| tn.qname().contains("::")).or_else(|| self.kotlin_extension(t, name)),
             // Swift extensions (emitted as class nodes) add members in other files and other
@@ -821,7 +888,8 @@ impl<'v> Engine<'v> {
                 })
             }
             _ => None,
-        }
+        };
+        found.or(non_callable)
     }
 
     /// Top-level Kotlin `fun Lockable.awaitNanos()`: the kernel names it `Lockable::awaitNanos`,

@@ -314,15 +314,18 @@ fn resolver_fact_sig(view: &View, f: FileId) -> ResolverFactSig {
                 || b.kind == BindKind::ReturnType as u8
                 || b.kind == BindKind::Fixture as u8
                 || b.kind == BindKind::TypeAlias as u8
-                || b.kind == BindKind::FactoryMixin as u8
-                || b.kind == BindKind::TraitImpl as u8)
+                || b.kind == BindKind::FactoryMixin as u8)
                 && b.node.is_some())
+                || b.kind == BindKind::TraitImpl as u8
                 || b.kind == BindKind::Deref as u8
                 || b.kind == BindKind::Mutation as u8
                 || b.kind == BindKind::CommonJsObject as u8
                 || b.kind == BindKind::MacroNamespace as u8
                 || b.kind == BindKind::Field as u8
-                || (b.kind == BindKind::Local as u8 && view.file(f).lang() == cg_core::Lang::Go && b.scope.0 == scope_base)
+                || (b.kind == BindKind::TypeParam as u8 && view.file(f).lang() == cg_core::Lang::Rust)
+                || (b.kind == BindKind::Local as u8
+                    && matches!(view.file(f).lang(), cg_core::Lang::Go | cg_core::Lang::Rust | cg_core::Lang::Python | cg_core::Lang::Kotlin)
+                    && b.scope.0 == scope_base)
         })
         .map(|b| {
             // A field's declared type or initializer can redirect calls in unchanged
@@ -364,6 +367,17 @@ fn reexported_import_sig(view: &View, f: FileId) -> BTreeSet<(String, String, St
     view.imports_of(f)
         .iter()
         .filter(|i| i.scope.0 == view.scope_base(f) && locals.contains(view.text_str(i.local)))
+        .map(|i| (view.text_str(i.local).to_owned(), view.text_str(i.spec).to_owned(), view.text_str(i.imported).to_owned(), i.kind, i.type_only))
+        .collect()
+}
+
+/// File-scope imports whose targets are used to interpret exported inference facts (e.g. a
+/// Python decorator `from py.eng_a import Engine` switched to `from py.eng_b import Engine` while
+/// `self.engine = Engine()` stays textually identical).
+fn file_import_sig(view: &View, f: FileId) -> BTreeSet<(String, String, String, u8, u8)> {
+    view.imports_of(f)
+        .iter()
+        .filter(|i| i.scope.0 == view.scope_base(f))
         .map(|i| (view.text_str(i.local).to_owned(), view.text_str(i.spec).to_owned(), view.text_str(i.imported).to_owned(), i.kind, i.type_only))
         .collect()
 }
@@ -671,6 +685,11 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
             // a changed signature or return type can move a call to another overload or redirect a receiver
             if old.get(k) != Some(details) {
                 record_sym(*f, &k.name, &mut d_names, &mut symbol_export_changed);
+                if let Some(owner) = k.qname.rsplit("::").nth(1) {
+                    if !owner.is_empty() && !owner.contains('.') {
+                        symbol_export_changed.entry(f.0).or_default().insert(owner.to_owned());
+                    }
+                }
                 if is_receiver_def(k.kind) && !k.name.is_empty() {
                     changed_receivers.insert(k.name.clone());
                 }
@@ -682,6 +701,11 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
         for k in old.keys() {
             if !new.contains_key(k) {
                 record_sym(*f, &k.name, &mut d_names, &mut symbol_export_changed);
+                if let Some(owner) = k.qname.rsplit("::").nth(1) {
+                    if !owner.is_empty() && !owner.contains('.') {
+                        symbol_export_changed.entry(f.0).or_default().insert(owner.to_owned());
+                    }
+                }
                 if is_receiver_def(k.kind) && !k.name.is_empty() {
                     changed_receivers.insert(k.name.clone());
                 }
@@ -740,6 +764,9 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                     if !fact.1.is_empty() {
                         changed_receivers.insert(fact.1.clone());
                     }
+                    if kind == BindKind::Local as u8 && fact.3 == "\x03mod" {
+                        broad_export_changed.push(*f);
+                    }
                 } else if kind == BindKind::Mutation as u8 {
                     // `obj.member = fn`: record both the full dotted name and the bare member tail.
                     if let Some((_, tail)) = fact.1.rsplit_once('.') {
@@ -751,8 +778,54 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                     || kind == BindKind::MacroNamespace as u8
                     || kind == BindKind::TraitImpl as u8
                     || kind == BindKind::TypeAlias as u8
+                    || kind == BindKind::TypeParam as u8
                 {
                     broad_export_changed.push(*f);
+                }
+            }
+        }
+        if states[i] == DeltaState::Replaced && (!old_facts.is_empty() || !new_facts.is_empty()) {
+            let old_imps = file_import_sig(&base_view, *f);
+            let new_imps = file_import_sig(&view1, *f);
+            if old_imps != new_imps {
+                let mut changed_locals: Vec<&str> = Vec::new();
+                let mut wildcard_imp_changed = false;
+                for imp in old_imps.symmetric_difference(&new_imps) {
+                    if imp.0.is_empty() || imp.0 == "*" {
+                        wildcard_imp_changed = true;
+                    } else {
+                        changed_locals.push(imp.0.as_str());
+                    }
+                }
+                if wildcard_imp_changed {
+                    broad_export_changed.push(*f);
+                } else {
+                    for fact in old_facts.iter().chain(new_facts.iter()) {
+                        let mentions = changed_locals.iter().any(|l| fact.3.contains(*l) || fact.4.contains(*l));
+                        if !mentions {
+                            continue;
+                        }
+                        record_sym(*f, &fact.1, &mut d_names, &mut symbol_export_changed);
+                        if !fact.2.is_empty() {
+                            let owner_tail = fact.2.rsplit("::").next().unwrap_or(&fact.2);
+                            record_sym(*f, owner_tail, &mut d_names, &mut symbol_export_changed);
+                        }
+                        if fact.0 == BindKind::Fixture as u8 {
+                            fixture_dirs.push(cg_resolve::project::parent_dir(view1.file(*f).path()).to_owned());
+                        } else if matches!(fact.0, k if k == BindKind::Field as u8 || k == BindKind::ReturnType as u8 || k == BindKind::Local as u8) {
+                            if !fact.1.is_empty() {
+                                changed_receivers.insert(fact.1.clone());
+                            }
+                        } else if matches!(
+                            fact.0,
+                            k if k == BindKind::Deref as u8
+                                || k == BindKind::TypeAlias as u8
+                                || k == BindKind::TraitImpl as u8
+                                || k == BindKind::MacroNamespace as u8
+                        ) {
+                            broad_export_changed.push(*f);
+                        }
+                    }
                 }
             }
         }
@@ -933,7 +1006,7 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                     }
                     let imported = view1.text_str(imp.imported);
                     let local = view1.text_str(imp.local);
-                    imported == sym || local == sym
+                    imported == "*" || local == "*" || imported == sym || local == sym
                 });
                 if imports_sym {
                     consumer_files.insert(g);
@@ -1066,7 +1139,7 @@ pub fn sync_locked(store: &Store, guard: &WriteGuard, root: &Path, opts: &SyncOp
                     let name = base.text.get(r.name);
                     (name.contains('.') || name.contains("::") || name.contains("->"))
                         && name.split(['.', ':']).flat_map(|s| s.split("->")).any(|seg| {
-                            let head = seg.split('(').next().unwrap_or(seg);
+                            let head = seg.split(['(', '[']).next().unwrap_or(seg);
                             !head.is_empty() && changed_receivers.contains(head)
                         })
                 };

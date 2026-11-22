@@ -20,11 +20,12 @@ fn conditional_items(cx: &mut Cx, root: Node) -> Option<Tree> {
     use tree_sitter::{ParseOptions, Parser};
 
     let src = cx.src;
-    if src.len() > 1024 * 1024 || !src.contains("cfg_") {
+    if src.len() > 1024 * 1024 || (!src.contains("cfg_") && !src.contains("pin_project")) {
         return None;
     }
     fn wrapper(name: &str) -> bool {
-        name.starts_with("cfg_") && name != "cfg_if" && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        let leaf = name.rsplit("::").next().unwrap_or(name);
+        leaf == "pin_project" || (leaf.starts_with("cfg_") && leaf != "cfg_if" && leaf.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'))
     }
     fn blank(bytes: &mut [u8]) {
         for b in bytes {
@@ -124,6 +125,17 @@ fn walk_children(cx: &mut Cx, n: Node, scope: u32) {
 fn walk(cx: &mut Cx, n: Node, scope: u32) {
     match n.kind() {
         "use_declaration" => use_decl(cx, n, scope),
+        "mod_item" => {
+            if n.child_by_field_name("body").is_some() {
+                if let Some(nm) = n.child_by_field_name("name") {
+                    let t = cx.text(nm).to_owned();
+                    let span = format!("{}:{}", cx.line(n), n.end_position().row as u32 + 1);
+                    cx.add_binding(scope, &t, BindKind::Local, "\x03mod", &span, 0);
+                }
+                let sc = cx.push_scope(ScopeKind::Block, scope, n);
+                walk_children(cx, n, sc);
+            }
+        }
         "function_item" | "function_signature_item" => function(cx, n, scope),
         "closure_expression" => closure(cx, n, scope),
         "impl_item" | "trait_item" => {
@@ -168,6 +180,10 @@ fn walk(cx: &mut Cx, n: Node, scope: u32) {
             let_decl(cx, n, scope);
             walk_children(cx, n, scope);
         }
+        "static_item" | "const_item" => {
+            static_or_const(cx, n, scope);
+            walk_children(cx, n, scope);
+        }
         "call_expression" => {
             if let Some(f) = n.child_by_field_name("function").filter(|f| f.kind() == "field_expression") {
                 if let Some(field) = f.child_by_field_name("field") {
@@ -210,9 +226,7 @@ fn walk(cx: &mut Cx, n: Node, scope: u32) {
             walk_children(cx, n, scope);
         }
         "let_condition" => {
-            if let Some(p) = n.child_by_field_name("pattern") {
-                bind_pattern(cx, p, scope, BindKind::Local);
-            }
+            let_cond(cx, n, scope);
             walk_children(cx, n, scope);
         }
         _ => walk_children(cx, n, scope),
@@ -284,8 +298,10 @@ fn generics_of(cx: &Cx, n: Node) -> Vec<(String, String)> {
 }
 
 /// A written type with the type parameters in scope replaced by their bounds: `Arc<T>` with
-/// `T: Svc` is `Arc<impl Svc>`; a parameter with no bound is `_`, which names no type.
-fn subst_generics(cx: &Cx, ty: &str) -> String {
+/// `T: Svc` is `Arc<impl Svc>`. When `keep_unbounded` is true (struct fields), an unbounded
+/// type parameter keeps its name (`T`) so an `impl<T: Bound>` block can supply the bound at
+/// the call site; otherwise it becomes `_`.
+fn subst_generics_mode(cx: &Cx, ty: &str, keep_unbounded: bool) -> String {
     if cx.generics.iter().all(Vec::is_empty) || ty.is_empty() {
         return ty.to_owned();
     }
@@ -303,6 +319,7 @@ fn subst_generics(cx: &Cx, ty: &str) -> String {
             // a path segment (`T::Output`, `a::T`) is no parameter
             let in_path = ty[..start].ends_with("::") || ty[i..].starts_with("::") || ty[..start].ends_with('\'');
             match lookup(word).filter(|_| !in_path) {
+                Some(bound) if bound == "_" && keep_unbounded => out.push_str(word),
                 Some(bound) => out.push_str(&bound),
                 None => out.push_str(word),
             }
@@ -312,6 +329,10 @@ fn subst_generics(cx: &Cx, ty: &str) -> String {
         }
     }
     out
+}
+
+fn subst_generics(cx: &Cx, ty: &str) -> String {
+    subst_generics_mode(cx, ty, false)
 }
 
 /// `impl Deref for Wrapper { type Target = Inner; }`: method calls on a `Wrapper` reach `Inner`.
@@ -348,8 +369,36 @@ fn deref_impl(cx: &mut Cx, n: Node, scope: u32) {
 }
 
 /// `impl Trait for X { fn m() }`: `m` is the trait's, which an inherent `X::m` shadows.
+/// Also record blanket extension impls (`impl<T: Base> ExtTrait for T {}`) with `node_row = NONE`
+/// so the resolver only applies imported extension traits to receivers implementing `Base`.
 fn trait_impl(cx: &mut Cx, n: Node, scope: u32) {
-    let (Some(_), Some(body)) = (n.child_by_field_name("trait"), n.child_by_field_name("body")) else { return };
+    let (Some(tr), Some(body)) = (n.child_by_field_name("trait"), n.child_by_field_name("body")) else { return };
+    if let Some(ty) = n.child_by_field_name("type").filter(|t| t.kind() == "type_identifier") {
+        let ty_name = cx.text(ty);
+        let bound = cx.generics.last().and_then(|g| g.iter().find(|(p, _)| p == ty_name).map(|(_, b)| b.clone()));
+        if let Some(rest) = bound.as_deref().and_then(|b| b.strip_prefix("impl ")) {
+            let tr_raw = cx.text(tr).split('<').next().unwrap_or("");
+            let tr_leaf = tr_raw.rsplit("::").next().unwrap_or(tr_raw).trim();
+            if !tr_leaf.is_empty() {
+                let line = cx.line(n);
+                for base in rest.split('+') {
+                    let base_raw = base.trim().split('<').next().unwrap_or("").trim();
+                    let base_leaf = base_raw.rsplit("::").next().unwrap_or(base_raw).trim();
+                    if !base_leaf.is_empty() {
+                        cx.facts.bindings.push(BindingFact {
+                            scope,
+                            name: tr_leaf.to_owned(),
+                            kind: BindKind::TraitImpl,
+                            decl_type: base_leaf.to_owned(),
+                            init_ctor: String::new(),
+                            line,
+                            node_row: NONE,
+                        });
+                    }
+                }
+            }
+        }
+    }
     for f in kids(body).filter(|c| c.kind() == "function_item") {
         let (Some(name), Some(row)) = (f.child_by_field_name("name"), cx.row_at(cx.start(f))) else { continue };
         let name = cx.text(name).to_owned();
@@ -363,6 +412,7 @@ fn rust_type_name(cx: &Cx, n: Node) -> String {
         "type_identifier" | "scoped_type_identifier" => cx.text(n).to_owned(),
         "generic_type" => cx.text(n).to_owned(),
         "reference_type" | "pointer_type" => n.child_by_field_name("type").map(|c| rust_type_name(cx, c)).unwrap_or_default(),
+        "array_type" => n.child_by_field_name("element").map(|c| rust_type_name(cx, c)).unwrap_or_default(),
         "abstract_type" | "dynamic_type" | "bounded_type" => {
             n.child_by_field_name("trait").or_else(|| n.named_child(0)).map(|c| rust_type_name(cx, c)).unwrap_or_default()
         }
@@ -400,7 +450,7 @@ fn value_path(cx: &Cx, v: Node, depth: u8) -> String {
         return String::new();
     }
     match v.kind() {
-        "identifier" | "scoped_identifier" => cx.text(v).to_owned(),
+        "identifier" | "scoped_identifier" | "self" => cx.text(v).to_owned(),
         "generic_function" => v.child_by_field_name("function").map(|f| value_path(cx, f, depth + 1)).unwrap_or_default(),
         "struct_expression" => v.child_by_field_name("name").map(|n| cx.text(n).to_owned()).unwrap_or_default(),
         "call_expression" => {
@@ -408,7 +458,7 @@ fn value_path(cx: &Cx, v: Node, depth: u8) -> String {
             if callee.is_empty() {
                 return String::new();
             }
-            if callee.ends_with("::new") {
+            if !callee.contains('.') {
                 if let Some(args) = v.child_by_field_name("arguments") {
                     let values: Vec<_> = kids(args).filter(|n| n.is_named() && !matches!(n.kind(), "comment" | "line_comment" | "block_comment")).collect();
                     if values.len() == 1 {
@@ -429,7 +479,8 @@ fn value_path(cx: &Cx, v: Node, depth: u8) -> String {
             }
         }
         "try_expression" => v.named_child(0).map(|c| value_path(cx, c, depth + 1)).filter(|p| !p.is_empty()).map(|p| format!("{p}?")).unwrap_or_default(),
-        "await_expression" | "reference_expression" | "parenthesized_expression" => v.named_child(0).map(|c| value_path(cx, c, depth + 1)).unwrap_or_default(),
+        "reference_expression" => v.child_by_field_name("value").map(|c| value_path(cx, c, depth + 1)).unwrap_or_default(),
+        "index_expression" | "await_expression" | "parenthesized_expression" => v.named_child(0).map(|c| value_path(cx, c, depth + 1)).unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -461,6 +512,41 @@ fn let_decl(cx: &mut Cx, n: Node, scope: u32) {
     }
 }
 
+fn static_or_const(cx: &mut Cx, n: Node, scope: u32) {
+    let Some(name) = n.child_by_field_name("name") else { return };
+    let nm = cx.text(name).to_owned();
+    let ty = n.child_by_field_name("type").map(|t| subst_generics(cx, &rust_type_name(cx, t))).unwrap_or_default();
+    let init = n.child_by_field_name("value").map(|v| value_info(cx, v)).unwrap_or_default();
+    // Rust `static` and `const` items are hoisted across their enclosing scope (line 0).
+    cx.add_binding(scope, &nm, BindKind::Local, &ty, &init, 0);
+}
+
+fn let_cond(cx: &mut Cx, n: Node, scope: u32) {
+    let Some(p) = n.child_by_field_name("pattern") else { return };
+    let init = n.child_by_field_name("value").map(|v| value_info(cx, v)).unwrap_or_default();
+    if !init.is_empty() && p.kind() == "tuple_struct_pattern" {
+        let ctor = p.child_by_field_name("type").map(|t| cx.text(t)).unwrap_or("");
+        let leaf = ctor.rsplit("::").next().unwrap_or(ctor);
+        if matches!(leaf, "Some" | "Ok") {
+            let fields: Vec<Node> = kids(p).filter(|c| c.is_named() && Some(*c) != p.child_by_field_name("type")).collect();
+            if fields.len() == 1 {
+                let inner = if fields[0].kind() == "mut_pattern" {
+                    fields[0].named_child(1).or_else(|| fields[0].named_child(0)).unwrap_or(fields[0])
+                } else {
+                    fields[0]
+                };
+                if inner.kind() == "identifier" {
+                    let nm = cx.text(inner).to_owned();
+                    let line = cx.line(n);
+                    cx.add_binding(scope, &nm, BindKind::Local, "", &format!("{init}?"), line);
+                    return;
+                }
+            }
+        }
+    }
+    bind_pattern(cx, p, scope, BindKind::Local);
+}
+
 fn params(cx: &mut Cx, list: Node, sc: u32) {
     for p in kids(list) {
         match p.kind() {
@@ -472,7 +558,7 @@ fn params(cx: &mut Cx, list: Node, sc: u32) {
                 let ty = p.child_by_field_name("type").map(|t| subst_generics(cx, &rust_type_name(cx, t))).unwrap_or_default();
                 if let Some(pat) = p.child_by_field_name("pattern") {
                     let target = if pat.kind() == "mut_pattern" { pat.named_child(0).unwrap_or(pat) } else { pat };
-                    if target.kind() == "identifier" {
+                    if matches!(target.kind(), "identifier" | "self") {
                         let nm = cx.text(target).to_owned();
                         let line = cx.line(p);
                         cx.add_binding(sc, &nm, BindKind::Param, &ty, "", line);
@@ -533,9 +619,10 @@ fn function_body(cx: &mut Cx, n: Node, scope: u32) {
 
 /// The type parameters of the item whose scope `sc` is (the innermost `cx.generics`).
 fn bind_type_params(cx: &mut Cx, sc: u32) {
-    let names: Vec<String> = cx.generics.last().map(|g| g.iter().map(|(n, _)| n.clone()).collect()).unwrap_or_default();
-    for n in names {
-        cx.add_binding(sc, &n, BindKind::TypeParam, "", "", 0);
+    let entries: Vec<(String, String)> = cx.generics.last().cloned().unwrap_or_default();
+    for (n, bound) in entries {
+        let dt = if bound == "_" { "" } else { bound.as_str() };
+        cx.add_binding(sc, &n, BindKind::TypeParam, dt, "", 0);
     }
 }
 
@@ -551,10 +638,24 @@ fn closure(cx: &mut Cx, n: Node, scope: u32) {
 
 fn struct_item(cx: &mut Cx, n: Node, scope: u32) {
     let sc = cx.push_scope(ScopeKind::Class, scope, n);
+    bind_type_params(cx, sc);
     let Some(body) = n.child_by_field_name("body") else { return };
+    if body.kind() == "ordered_field_declaration_list" {
+        let mut idx = 0usize;
+        for f in kids(body) {
+            if !f.is_named() || matches!(f.kind(), "attribute_item" | "visibility_modifier" | "line_comment" | "block_comment") {
+                continue;
+            }
+            let ty = subst_generics_mode(cx, &rust_type_name(cx, f), true);
+            let line = cx.line(f);
+            cx.add_binding(sc, &idx.to_string(), BindKind::Field, &ty, "", line);
+            idx += 1;
+        }
+        return;
+    }
     for f in kids(body) {
         if f.kind() == "field_declaration" {
-            let ty = f.child_by_field_name("type").map(|t| subst_generics(cx, &rust_type_name(cx, t))).unwrap_or_default();
+            let ty = f.child_by_field_name("type").map(|t| subst_generics_mode(cx, &rust_type_name(cx, t), true)).unwrap_or_default();
             if let Some(nm) = f.child_by_field_name("name") {
                 let t = cx.text(nm).to_owned();
                 let line = cx.line(f);
@@ -566,13 +667,35 @@ fn struct_item(cx: &mut Cx, n: Node, scope: u32) {
 
 // ----------------------------------------------------------------------------- use trees
 
+fn inline_mod_depth(mut n: Node) -> usize {
+    let mut depth = 0;
+    while let Some(p) = n.parent() {
+        if p.kind() == "mod_item" && p.child_by_field_name("body").is_some() {
+            depth += 1;
+        }
+        n = p;
+    }
+    depth
+}
+
 fn use_decl(cx: &mut Cx, n: Node, scope: u32) {
-    let public = kids(n).any(|c| c.kind() == "visibility_modifier");
+    let mod_depth = inline_mod_depth(n);
+    let public = mod_depth == 0 && kids(n).any(|c| c.kind() == "visibility_modifier");
     let Some(arg) = n.child_by_field_name("argument") else { return };
     let line = cx.line(n);
     let mut out = Vec::new();
     flatten(cx, arg, &[], &mut out);
-    for (path, local, wildcard) in out {
+    for (mut path, local, wildcard) in out {
+        // `mod tests { use super::foo; }`: each inline `mod` consumes one leading `super::`
+        // before leaving the file.
+        if mod_depth > 0 && path.first().map(String::as_str) == Some("super") {
+            let lead = path.iter().take_while(|s| s.as_str() == "super").count();
+            let strip = lead.min(mod_depth);
+            path.drain(..strip);
+            if strip == lead {
+                path.insert(0, "self".to_owned());
+            }
+        }
         // path = full item path segments; the item is the last one
         if wildcard {
             let spec = path.join("::");

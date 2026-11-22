@@ -108,9 +108,13 @@ enum StdWrapper {
     Option,
     Pointer,
     /// `Mutex<T>` / `RwLock<T>` (std, tokio, parking_lot): `lock()` gives a guard.
-    Lock,
+    /// Carries the project's own lock `NodeIdx` when the indexed repository itself defines it.
+    Lock(Option<NodeIdx>),
     /// A lock's guard: it dereferences to the value, and std's `unwrap` keeps it.
     Guard,
+    /// A generic project wrapper (`Spawn<T>`) with `impl<T> Deref for W<T> { type Target = T; }`:
+    /// try the wrapper's own methods first, then dereference to the inner value.
+    Deref(NodeIdx),
 }
 
 /// The methods of a lock that hand out a guard.
@@ -155,11 +159,34 @@ impl ValueType {
         self.wrappers.is_empty().then_some(self.node).flatten()
     }
 
+    fn clone_receiver(&self) -> Option<NodeIdx> {
+        self.wrappers.is_empty().then_some(self.node).flatten()
+    }
+
     fn method_receiver(&self, method: &str) -> Option<NodeIdx> {
         if self.wrappers.contains(&StdWrapper::Pointer) && pointer_method(method) {
             return None;
         }
-        self.wrappers.iter().all(|w| matches!(w, StdWrapper::Pointer | StdWrapper::Guard)).then_some(self.node).flatten()
+        if !method.is_empty() {
+            if let Some(&StdWrapper::Deref(wrap)) = self.wrappers.last() {
+                return Some(wrap);
+            }
+        }
+        // When the project itself defines `Mutex`/`RwLock` (e.g. Tokio), calling a lock method on
+        // `Arc<Mutex<T>>` or `Mutex<T>` targets the project's own lock type directly.
+        if !method.is_empty() && self.wrappers.iter().all(|w| matches!(w, StdWrapper::Pointer | StdWrapper::Lock(_))) {
+            if let Some(StdWrapper::Lock(Some(lock_ty))) = self.wrappers.iter().rev().find(|w| matches!(w, StdWrapper::Lock(_))) {
+                return Some(*lock_ty);
+            }
+        }
+        self.wrappers.iter().all(|w| matches!(w, StdWrapper::Pointer | StdWrapper::Guard | StdWrapper::Deref(_))).then_some(self.node).flatten()
+    }
+
+    fn deref_inner(&self) -> Option<NodeIdx> {
+        if !matches!(self.wrappers.last(), Some(StdWrapper::Deref(_))) {
+            return None;
+        }
+        self.wrappers.iter().all(|w| matches!(w, StdWrapper::Pointer | StdWrapper::Guard | StdWrapper::Deref(_))).then_some(self.node).flatten()
     }
 }
 
@@ -301,13 +328,14 @@ pub struct WorkerCx<'e, 'v> {
     cache_bytes: usize,
     field_cache: FxHashMap<NodeIdx, FieldList>,
     field_cache_bytes: usize,
-    /// Rust: the type `Self` / `self` stand for in the call being resolved.
+    /// Rust: the type `Self` / `self` stand for and the call-site scope in the call being resolved.
     self_ty: Option<NodeIdx>,
+    rust_scope: Option<u32>,
 }
 
 impl<'e, 'v> WorkerCx<'e, 'v> {
     pub fn new() -> Self {
-        WorkerCx { cache: Vec::new(), cache_bytes: 0, field_cache: FxHashMap::default(), field_cache_bytes: 0, self_ty: None }
+        WorkerCx { cache: Vec::new(), cache_bytes: 0, field_cache: FxHashMap::default(), field_cache_bytes: 0, self_ty: None, rust_scope: None }
     }
 
     pub fn file_cx(&mut self, e: &'e Engine<'v>, f: FileId) -> Rc<FileCx<'e, 'v>> {
@@ -525,6 +553,21 @@ impl<'e, 'v> FileCx<'e, 'v> {
         false
     }
 
+    /// Trait bound(s) of an in-scope Rust type parameter (`U: FromStream` -> `"impl FromStream"`).
+    fn type_param_bound(&self, name: &str, scope: u32) -> Option<&'v str> {
+        let mut s = Some(scope);
+        while let Some(c) = s {
+            if let Some(list) = self.bindings.get(&(c, name)) {
+                if let Some(b) = list.iter().find(|b| b.kind == BindKind::TypeParam as u8) {
+                    let dt = self.view.text_str(b.decl_type);
+                    return (!dt.is_empty()).then_some(dt);
+                }
+            }
+            s = self.scope_parent(c);
+        }
+        None
+    }
+
     fn visible_import(&self, name: &str, scope: u32) -> Option<u32> {
         let list = self.import_by_local.get(name)?;
         list.iter().copied().find(|i| {
@@ -576,7 +619,9 @@ impl<'e, 'v> FileCx<'e, 'v> {
     /// Kinds whose members are reached through the type: every type, and Ruby modules
     /// (`module Helpers; def halt; end; end`).
     fn holds_members(&self, k: NodeKind) -> bool {
-        k.is_type() || (self.family == LangFamily::Ruby && k == NodeKind::Module) || (self.lang == Lang::Vue && k == NodeKind::Component)
+        k.is_type()
+            || (matches!(self.family, LangFamily::Ruby | LangFamily::Rust) && k == NodeKind::Module)
+            || (self.lang == Lang::Vue && k == NodeKind::Component)
     }
 
     fn is_svelte_rune_file(&self) -> bool {
@@ -669,13 +714,14 @@ impl<'e, 'v> FileCx<'e, 'v> {
         if name.is_empty() {
             return TypeRes::Unknown;
         }
+        let scope = if self.family == LangFamily::Rust && line != u32::MAX { self.scope_at(line, u32::MAX) } else { 0 };
         if let Some((head, rest)) = split_head(name) {
             return match self.qualified_type(wcx, head, rest, name) {
                 TypeRes::Unknown if self.family == LangFamily::C => self.cpp_scoped(name, true).map_or(TypeRes::Unknown, TypeRes::Node),
                 t => t,
             };
         }
-        match self.resolve_name(wcx, name, Accept::Type, 0, line, None, true) {
+        match self.resolve_name(wcx, name, Accept::Type, scope, line, None, true) {
             NameRes::Found(n, ..) => TypeRes::Node(n),
             NameRes::External => TypeRes::External,
             NameRes::Builtin => TypeRes::Builtin,
@@ -861,7 +907,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
     }
 
     fn binding_value(&self, wcx: &mut WorkerCx<'e, 'v>, b: &BindingRec, depth: u8) -> Option<ValueType> {
-        if depth >= 16 {
+        if depth >= 32 {
             return None;
         }
         let dt = self.view.text_str(b.decl_type);
@@ -886,19 +932,42 @@ impl<'e, 'v> FileCx<'e, 'v> {
             }
         }
         // The new variable is not in scope in its own initializer (`let rt = rt()`).
+        // Kotlin scope-function lambda params and rebound `this` evaluate their initializer in the
+        // enclosing scope where the lambda call sits.
+        let init_scope = if self.lang == Lang::Kotlin && b.kind == BindKind::Param as u8 {
+            self.scopes.get(scope as usize).map_or(scope, |s| if s.parent.0 == NONE { scope } else { s.parent.0.wrapping_sub(self.scope_base) })
+        } else {
+            scope
+        };
         let root = init.strip_prefix(JS_SATISFIES_VALUE).unwrap_or(init);
         let root = root.strip_prefix(JS_BINDING_ALIAS).unwrap_or(root);
-        let shadows = root.split(['.', ':', '(']).next() == Some(self.view.text_str(b.name));
+        let shadows = init_scope == scope && root.split(['.', ':', '(']).next() == Some(self.view.text_str(b.name));
         let line = if shadows { b.line.saturating_sub(1) } else { b.line };
-        self.expression_value(wcx, init, scope, line, depth + 1)
+        self.expression_value(wcx, init, init_scope, line, depth + 1)
+    }
+
+    fn django_proxy_target(&self, n: NodeIdx) -> Option<NodeIdx> {
+        if self.family != LangFamily::Python {
+            return None;
+        }
+        if self.e.django.db_conn == Some(n) {
+            self.e.django.db_wrapper
+        } else if self.e.django.cache == Some(n) {
+            self.e.django.base_cache
+        } else {
+            None
+        }
     }
 
     fn imported_binding_value(&self, wcx: &mut WorkerCx<'e, 'v>, name: &str, scope: u32, depth: u8) -> Option<ValueType> {
-        if depth >= 16 {
+        if depth >= 32 {
             return None;
         }
         let import = self.visible_import(name, scope)?;
         let Bound::Node(node) = self.e.bind_import(self.file, import as usize) else { return None };
+        if let Some(proxy) = self.django_proxy_target(node) {
+            return Some(ValueType::plain(proxy));
+        }
         if self.view.node(node).kind().is_type() {
             return Some(ValueType::plain(node));
         }
@@ -935,8 +1004,13 @@ impl<'e, 'v> FileCx<'e, 'v> {
     }
 
     fn expression_value(&self, wcx: &mut WorkerCx<'e, 'v>, init: &str, scope: u32, line: u32, depth: u8) -> Option<ValueType> {
-        if depth >= 16 {
+        if depth >= 32 {
             return None;
+        }
+        if self.lang == Lang::Kotlin {
+            if let Some(callee) = init.strip_prefix('\x01') {
+                return self.kotlin_lambda_receiver(wcx, callee, scope, line, depth + 1);
+            }
         }
         if let Some(inner) = init.strip_prefix(JS_SATISFIES_VALUE) {
             return self.expression_value(wcx, inner, scope, line, depth + 1);
@@ -969,22 +1043,69 @@ impl<'e, 'v> FileCx<'e, 'v> {
                 return self.tuple_element(wcx, call, index, scope, line, depth + 1);
             }
             if let Some((callee, args)) = split_call(init) {
-                if let Some(owner) = callee.strip_suffix("::new") {
-                    if self.std_wrapper(wcx, owner) == Some(StdWrapper::Pointer) {
+                if let Some(owner) = callee.strip_suffix("::new").or_else(|| callee.strip_suffix("::pin")) {
+                    if self.std_wrapper_in(wcx, owner, scope, line) == Some(StdWrapper::Pointer) {
                         let mut value = self.expression_value(wcx, args, scope, line, depth + 1)?;
                         value.wrappers.push(StdWrapper::Pointer);
                         return Some(value);
                     }
                 }
-                return self.call_value(wcx, callee, scope, line, depth + 1);
+                if let Some(v) = self.call_value(wcx, callee, scope, line, depth + 1) {
+                    if let Some(wrap) = v.clone_receiver().filter(|&w| self.is_generic_deref(wcx, w)) {
+                        if let Some(mut inner) = self.rust_deref_call_inner(wcx, callee, args, scope, line, depth + 1) {
+                            inner.wrappers.push(StdWrapper::Deref(wrap));
+                            return Some(inner);
+                        }
+                    }
+                    return Some(v);
+                }
+                return None;
             }
         }
         if let Some(call) = init.strip_suffix("()") {
             return self.call_value(wcx, call, scope, line, depth + 1);
         }
-        if self.family == LangFamily::Rust {
+        if self.family == LangFamily::Python {
+            if let Some(container) = init.strip_suffix("[]") {
+                let cv = self.expression_value(wcx, container, scope, line, depth + 1)?;
+                let ct = cv.receiver()?;
+                if self.e.django.conn_handler == Some(ct) {
+                    return self.e.django.db_wrapper.map(ValueType::plain);
+                }
+                if self.e.django.cache_handler == Some(ct) {
+                    return self.e.django.base_cache.map(ValueType::plain);
+                }
+                if let Some(m) = self.e.find_member(ct, "__getitem__") {
+                    return self.returned_value(wcx, m, Some(ct), depth + 1);
+                }
+                return None;
+            }
+            if !init.contains(['.', ':', '(']) {
+                if let Some(other) = self.lookup_binding(init, scope, line, false) {
+                    if let Some(v) = self.binding_value(wcx, other, depth + 1) {
+                        return Some(v);
+                    }
+                }
+                if let Some(v) = self.imported_binding_value(wcx, init, scope, depth + 1) {
+                    return Some(v);
+                }
+            }
+        }
+        if (self.family == LangFamily::Rust || self.lang == Lang::Kotlin) && !init.contains(['.', ':', '(']) {
             if let Some(other) = self.lookup_binding(init, scope, line, false) {
                 return self.binding_value(wcx, other, depth + 1);
+            }
+            if self.lang == Lang::Kotlin {
+                if let Some(v) = self.class_field_value(wcx, scope, init, depth + 1).or_else(|| self.imported_binding_value(wcx, init, scope, depth + 1)) {
+                    return Some(v);
+                }
+            }
+        }
+        if let Some((lhs, field)) = init.rsplit_once('.') {
+            if lhs.contains('(') && !field.contains(['(', ')', ':']) {
+                let rv = self.expression_value(wcx, lhs, scope, line, depth + 1)?;
+                let t = rv.method_receiver("")?;
+                return self.field_value(wcx, t, field, depth + 1);
             }
         }
         if !init.contains('(') && !init.contains("::") && init.contains('.') {
@@ -998,7 +1119,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
     /// `let (tx, rx) = mpsc::channel()`: element `index` of the tuple a Rust function returns,
     /// through the `Result` or `Option` a `?` opens.
     fn tuple_element(&self, wcx: &mut WorkerCx<'e, 'v>, call: &str, index: usize, scope: u32, line: u32, depth: u8) -> Option<ValueType> {
-        if depth >= 16 {
+        if depth >= 32 {
             return None;
         }
         let (call, tried) = match call.strip_suffix('?') {
@@ -1006,7 +1127,13 @@ impl<'e, 'v> FileCx<'e, 'v> {
             None => (call, false),
         };
         let (callee, _) = split_call(call)?;
-        let f = self.rust_callee(wcx, callee, scope, line)?;
+        let f = if let Some((owner, method)) = callee.rsplit_once('.') {
+            let rv = self.expression_value(wcx, owner, scope, line, depth + 1)?;
+            let node = rv.method_receiver(method)?;
+            self.rust_member(wcx, node, method)?.0
+        } else {
+            self.rust_callee(wcx, callee, scope, line)?
+        };
         let node = self.view.node(f);
         let cx = wcx.file_cx(self.e, node.file());
         let mut ty = match self.e.return_types.get(&f) {
@@ -1111,9 +1238,20 @@ impl<'e, 'v> FileCx<'e, 'v> {
     }
 
     fn std_wrapper(&self, wcx: &mut WorkerCx<'e, 'v>, name: &str) -> Option<StdWrapper> {
+        self.std_wrapper_in(wcx, name, 0, u32::MAX)
+    }
+
+    fn std_wrapper_in(&self, wcx: &mut WorkerCx<'e, 'v>, name: &str, scope: u32, line: u32) -> Option<StdWrapper> {
         let (prefix, leaf) = name.rsplit_once("::").unwrap_or(("", name));
+        let lock_wrapper = |wcx: &mut WorkerCx<'e, 'v>| {
+            let project_ty = match self.lookup_type_at(wcx, name, line) {
+                TypeRes::Node(n) => Some(n),
+                _ => None,
+            };
+            StdWrapper::Lock(project_ty)
+        };
         if prefix.is_empty() {
-            if let Some(i) = self.visible_import(name, 0) {
+            if let Some(i) = self.visible_import(name, scope) {
                 let imp = &self.imports[i as usize];
                 let spec = self.view.text_str(imp.spec);
                 let imported = self.view.text_str(imp.imported);
@@ -1124,7 +1262,10 @@ impl<'e, 'v> FileCx<'e, 'v> {
                     | ("std::pin" | "core::pin", "Pin") => Some(StdWrapper::Pointer),
                     ("std::result" | "core::result" | "std::io", "Result") => Some(StdWrapper::Result),
                     ("std::option" | "core::option", "Option") => Some(StdWrapper::Option),
-                    ("std::sync" | "tokio::sync" | "parking_lot" | "futures::lock" | "async_lock" | "spin", "Mutex" | "RwLock") => Some(StdWrapper::Lock),
+                    ("std::sync" | "tokio::sync" | "parking_lot" | "futures::lock" | "async_lock" | "spin", "Mutex" | "RwLock") => Some(lock_wrapper(wcx)),
+                    // Project re-export of std smart pointer (e.g. `use crate::loom::sync::Arc;` -> `pub use std::sync::Arc;`)
+                    (_, "Arc" | "Rc" | "Box" | "Pin") if !matches!(self.e.bind_import(self.file, i as usize), Bound::Node(_)) => Some(StdWrapper::Pointer),
+                    (_, "Mutex" | "RwLock") if spec.ends_with("::sync") || spec == "sync" => Some(lock_wrapper(wcx)),
                     _ => None,
                 };
             }
@@ -1133,19 +1274,20 @@ impl<'e, 'v> FileCx<'e, 'v> {
             "Result" => StdWrapper::Result,
             "Option" => StdWrapper::Option,
             "Arc" | "Rc" | "Box" | "Pin" => StdWrapper::Pointer,
-            "Mutex" | "RwLock" => StdWrapper::Lock,
+            "Mutex" | "RwLock" => lock_wrapper(wcx),
             _ => return None,
         };
+        let is_lock = matches!(wrapper, StdWrapper::Lock(_));
         let standard = match prefix {
             "std::result" | "core::result" | "std::io" => wrapper == StdWrapper::Result,
             "std::option" | "core::option" => wrapper == StdWrapper::Option,
-            "std::sync" | "tokio::sync" | "parking_lot" | "futures::lock" if wrapper == StdWrapper::Lock => true,
+            "std::sync" | "tokio::sync" | "parking_lot" | "futures::lock" if is_lock => true,
             "std::sync" | "alloc::sync" => leaf == "Arc",
             "std::rc" | "alloc::rc" => leaf == "Rc",
             "std::boxed" | "alloc::boxed" => leaf == "Box",
             "std::pin" | "core::pin" => leaf == "Pin",
-            "" => matches!(self.lookup_type(wcx, name), TypeRes::Builtin),
-            "io" if wrapper == StdWrapper::Result => self.visible_import("io", 0).is_some_and(|i| {
+            "" => matches!(self.lookup_type_at(wcx, name, line), TypeRes::Builtin) || matches!(wrapper, StdWrapper::Lock(Some(_))),
+            "io" if wrapper == StdWrapper::Result => self.visible_import("io", scope).is_some_and(|i| {
                 let imp = &self.imports[i as usize];
                 self.view.text_str(imp.spec) == "std" && self.view.text_str(imp.imported) == "io"
             }),
@@ -1155,7 +1297,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
     }
 
     fn type_value(&self, wcx: &mut WorkerCx<'e, 'v>, name: &str, receiver: Option<NodeIdx>, line: u32, depth: u8) -> Option<ValueType> {
-        if depth >= 16 || name.len() > 4096 {
+        if depth >= 32 || name.len() > 4096 {
             return None;
         }
         let mut name = name.trim();
@@ -1173,17 +1315,23 @@ impl<'e, 'v> FileCx<'e, 'v> {
             if name == "_" {
                 return None; // a type parameter with no bound
             }
+            // Slice / array types (`[Level]`, `[Level; 6]`): unwrap to element type.
+            if let Some(inner) = name.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                let elem = inner.split(';').next().unwrap_or(inner).trim();
+                return self.type_value(wcx, elem, receiver, line, depth + 1);
+            }
+            let scope = if line != u32::MAX { self.scope_at(line, u32::MAX) } else { 0 };
             // `impl Svc + Send` / `dyn Svc`: the first bound that is a project trait
             if let Some(bounds) = name.strip_prefix("impl ").or_else(|| name.strip_prefix("dyn ")) {
-                return bounds.split('+').map(str::trim).filter(|b| !b.starts_with('\'')).find_map(|b| match self.lookup_type(wcx, b) {
+                return bounds.split('+').map(str::trim).filter(|b| !b.starts_with('\'')).find_map(|b| match self.lookup_type_at(wcx, b, line) {
                     TypeRes::Node(t) => Some(ValueType::plain(t)),
                     _ => None,
                 });
             }
             if let Some(open) = name.find('<') {
                 let base = name[..open].trim();
-                let Some(wrapper) = self.std_wrapper(wcx, base) else {
-                    return match self.lookup_type(wcx, base) {
+                let Some(wrapper) = self.std_wrapper_in(wcx, base, scope, line) else {
+                    return match self.lookup_type_at(wcx, base, line) {
                         TypeRes::Node(t) => Some(ValueType::plain(t)),
                         _ => None,
                     };
@@ -1202,9 +1350,19 @@ impl<'e, 'v> FileCx<'e, 'v> {
                         _ => {}
                     }
                 }
-                let mut inner = self.type_value(wcx, &args[..end], receiver, line, depth + 1)?;
+                let mut inner = match self.type_value(wcx, &args[..end], receiver, line, depth + 1) {
+                    Some(v) => v,
+                    // `RwLock<()>` / `Mutex<usize>` when the project itself defines `RwLock` / `Mutex`:
+                    // keep the lock wrapper even when the inner payload is a primitive/unit type.
+                    None if matches!(wrapper, StdWrapper::Lock(Some(_))) => ValueType::unknown(),
+                    None => return None,
+                };
                 inner.wrappers.push(wrapper);
                 return Some(inner);
+            }
+            // Never let an unbounded type parameter (`T` on `struct Foo<T>`) resolve to an unrelated global type.
+            if !name.contains("::") && self.type_param(name, scope) {
+                return self.type_param_bound(name, scope).and_then(|b| self.type_value(wcx, b, receiver, line, depth + 1));
             }
         }
         match self.lookup_type_at(wcx, name, line) {
@@ -1238,6 +1396,12 @@ impl<'e, 'v> FileCx<'e, 'v> {
             }
             if !rt.is_empty() {
                 return cx.type_value(wcx, rt, receiver, u32::MAX, depth + 1);
+            }
+            if cx.family == LangFamily::Python && receiver.is_some() {
+                let prev = std::mem::replace(&mut wcx.self_ty, receiver);
+                let res = cx.expression_value(wcx, self.view.text_str(b.init_ctor), b.scope.0.wrapping_sub(cx.scope_base), u32::MAX, depth + 1);
+                wcx.self_ty = prev;
+                return res;
             }
             return cx.expression_value(wcx, self.view.text_str(b.init_ctor), b.scope.0.wrapping_sub(cx.scope_base), u32::MAX, depth + 1);
         }
@@ -1281,7 +1445,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
     /// Follow declared return types through a bounded chain. Static methods do
     /// not implicitly return their owner, and Result<T> is not treated as T.
     fn call_value(&self, wcx: &mut WorkerCx<'e, 'v>, callee: &str, scope: u32, line: u32, depth: u8) -> Option<ValueType> {
-        if depth >= 16 || callee.len() > 4096 {
+        if depth >= 32 || callee.len() > 4096 {
             return None;
         }
         // `detail::counting_buffer<>()`, `detail::get_buffer<char>(out)`
@@ -1291,9 +1455,16 @@ impl<'e, 'v> FileCx<'e, 'v> {
             }
         }
         if let Some((inner, method)) = callee.rsplit_once('.') {
-            if inner.ends_with(['?', ')']) {
-                let receiver = self.expression_value(wcx, inner, scope, line, depth + 1)?;
-                return self.member_return(wcx, receiver, method, depth + 1);
+            if inner.ends_with(['?', ')']) || (inner.contains('(') && !inner.contains("::")) {
+                if let Some(receiver) = self.expression_value(wcx, inner, scope, line, depth + 1) {
+                    return self.member_return(wcx, receiver, method, depth + 1);
+                }
+                if self.lang == Lang::Kotlin {
+                    if let Some(ext) = self.kotlin_extension_node(wcx, None, None, method, scope, None) {
+                        return self.returned_value(wcx, ext, None, depth + 1);
+                    }
+                }
+                return None;
             }
         }
         // Rust `task::spawn()`, `tokio_test::task::spawn()`, `Type::new()`: resolve module or type path
@@ -1315,7 +1486,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
             // operations. Require the actual Model base in the resolved
             // hierarchy; a coincidentally named `.objects.create` is insufficient.
             if self.family == LangFamily::Python && matches!(method, "create" | "get" | "first" | "last" | "earliest" | "latest") {
-                if let (Some(base), Some(model)) = (self.e.django_model, owner.strip_suffix(".objects")) {
+                if let (Some(base), Some(model)) = (self.e.django.model, owner.strip_suffix(".objects")) {
                     if let TypeRes::Node(t) = self.lookup_type(wcx, model) {
                         if t == base || self.e.ancestors(t).contains(&base) {
                             return Some(ValueType::plain(t));
@@ -1328,14 +1499,15 @@ impl<'e, 'v> FileCx<'e, 'v> {
                     self.family,
                     LangFamily::Python | LangFamily::Jvm | LangFamily::Js | LangFamily::Php | LangFamily::CSharp | LangFamily::Swift | LangFamily::Ruby
                 );
-            let receiver = if let Some(b) = self
-                .lookup_binding(owner, scope, line, false)
-                .filter(|b| !(implicit && self.view.text_str(b.decl_type).is_empty() && self.view.text_str(b.init_ctor).is_empty()))
-            {
+            let binding = self
+                .lookup_receiver_binding(owner, scope, line)
+                .filter(|b| !(implicit && self.view.text_str(b.decl_type).is_empty() && self.view.text_str(b.init_ctor).is_empty()));
+            let receiver = if let Some(b) = binding {
                 self.binding_value(wcx, b, depth + 1)
             } else if implicit {
                 // `self.make()` / `this.make()`: a method of the class the code sits in
-                self.class_at(scope).map(ValueType::plain)
+                let cls = if self.family == LangFamily::Python { wcx.self_ty.or_else(|| self.class_at(scope)) } else { self.class_at(scope) };
+                cls.map(ValueType::plain)
             } else if (matches!(self.family, LangFamily::Jvm | LangFamily::CSharp | LangFamily::Swift) || self.lang == Lang::Cpp)
                 && !owner.contains('.')
                 && !owner.contains("::")
@@ -1348,6 +1520,12 @@ impl<'e, 'v> FileCx<'e, 'v> {
             };
             if let Some(t) = receiver {
                 return self.member_return(wcx, t, method, depth + 1);
+            }
+            if self.lang == Lang::Kotlin {
+                let decl = binding.map(|b| self.view.text_str(b.decl_type)).filter(|s| !s.is_empty());
+                if let Some(ext) = self.kotlin_extension_node(wcx, None, decl, method, scope, None) {
+                    return self.returned_value(wcx, ext, None, depth + 1);
+                }
             }
             // Imported module / package / module-level variable receiver: `task::spawn()`, `gin.Default()`, `mod.Client()`
             if !owner.contains('.') && !owner.contains("::") {
@@ -1370,6 +1548,9 @@ impl<'e, 'v> FileCx<'e, 'v> {
                             }
                         }
                         Bound::Node(n) => {
+                            if let Some(proxy) = self.django_proxy_target(n) {
+                                return self.member_return(wcx, ValueType::plain(proxy), method, depth + 1);
+                            }
                             let owner_file = self.view.hot(n).file;
                             let cx = wcx.file_cx(self.e, owner_file);
                             if let Some(b) = cx.file_binding(self.view.node(n).name()) {
@@ -1390,10 +1571,122 @@ impl<'e, 'v> FileCx<'e, 'v> {
                 }
             }
         }
+        if !callee.contains(['.', ':']) {
+            if let Some(t) = self.kotlin_this_type(wcx, scope, line, depth + 1) {
+                if let Some(m) = self.e.find_member(t, callee) {
+                    return self.returned_value(wcx, m, Some(t), depth + 1);
+                }
+            }
+            if matches!(self.family, LangFamily::Jvm | LangFamily::CSharp | LangFamily::Swift) || self.lang == Lang::Cpp {
+                let mut t = self.class_at(scope);
+                for _ in 0..8 {
+                    let Some(ty) = t else { break };
+                    if let Some(m) = self.e.find_member(ty, callee) {
+                        return self.returned_value(wcx, m, Some(ty), depth + 1);
+                    }
+                    t = self.view.node(ty).parent().filter(|p| kind_of(self.view, *p).is_type());
+                }
+            }
+        }
         match self.resolve_name(wcx, callee, Accept::Callable, scope, line, None, true) {
             NameRes::Found(n, ..) => self.returned_value(wcx, n, self.enclosing_type(n), depth + 1),
             _ => None,
         }
+    }
+
+    /// Walk up lexical scopes to find the innermost Kotlin rebound `this` (from `.apply`, `.run`,
+    /// `with(x)`, an extension function receiver, or a DSL lambda `Receiver.() -> R`) that resolves.
+    fn kotlin_this_type(&self, wcx: &mut WorkerCx<'e, 'v>, mut scope: u32, line: u32, depth: u8) -> Option<NodeIdx> {
+        if self.lang != Lang::Kotlin || depth >= 32 {
+            return None;
+        }
+        loop {
+            if let Some(list) = self.bindings.get(&(scope, "this")) {
+                if let Some(b) = list.iter().rev().find(|b| b.line <= line) {
+                    if let Some(t) = self.binding_value(wcx, b, depth + 1).and_then(|v| v.receiver()) {
+                        return Some(t);
+                    }
+                }
+            }
+            let Some(sc) = self.scopes.get(scope as usize) else { break };
+            if sc.parent.0 == NONE {
+                break;
+            }
+            let next = sc.parent.0.wrapping_sub(self.scope_base);
+            if next == scope {
+                break;
+            }
+            scope = next;
+        }
+        None
+    }
+
+    /// Resolve a Kotlin DSL receiver lambda's receiver type from the called function's signature
+    /// (e.g. `fun testStateMachineDnsCall(block: StateMachineDnsCallTester.() -> Unit)`).
+    fn kotlin_lambda_receiver(&self, wcx: &mut WorkerCx<'e, 'v>, callee: &str, scope: u32, line: u32, depth: u8) -> Option<ValueType> {
+        if depth >= 32 {
+            return None;
+        }
+        let target = if let Some((owner, method)) = callee.rsplit_once('.') {
+            let rv = self.expression_value(wcx, owner, scope, line, depth + 1)?;
+            let ty = rv.method_receiver(method)?;
+            self.rust_member(wcx, ty, method).map(|(m, _)| m)?
+        } else {
+            let mut found = None;
+            let mut t = self.class_at(scope);
+            for _ in 0..8 {
+                let Some(ty) = t else { break };
+                if let Some(m) = self.e.find_member(ty, callee) {
+                    found = Some(m);
+                    break;
+                }
+                t = self.view.node(ty).parent().filter(|p| kind_of(self.view, *p).is_type());
+            }
+            found.or_else(|| match self.resolve_name(wcx, callee, Accept::Callable, scope, line, None, true) {
+                NameRes::Found(n, ..) => Some(n),
+                _ => None,
+            })?
+        };
+        let sig = self.view.node(target).signature()?;
+        let arrow = sig.rfind("->")?;
+        let before_arrow = sig[..arrow].trim_end();
+        let dot_paren = before_arrow.rfind(".(")?;
+        let mut raw = before_arrow[..dot_paren].trim_end();
+        if raw.ends_with('>') {
+            let mut nest = 0u32;
+            for (i, ch) in raw.char_indices().rev() {
+                match ch {
+                    '>' => nest += 1,
+                    '<' => {
+                        nest = nest.saturating_sub(1);
+                        if nest == 0 {
+                            raw = raw[..i].trim_end();
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let recv = raw.rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.').next()?.trim_matches('.');
+        if recv.is_empty() {
+            return None;
+        }
+        let cx = wcx.file_cx(self.e, self.view.hot(target).file);
+        cx.type_value(wcx, recv, None, u32::MAX, depth + 1)
+    }
+
+    fn lookup_receiver_binding(&self, name: &str, scope: u32, line: u32) -> Option<&'v BindingRec> {
+        let found = self.lookup_binding(name, scope, line, false)?;
+        if found.line == line {
+            let init = self.view.text_str(found.init_ctor);
+            let init = init.strip_prefix(JS_SATISFIES_VALUE).unwrap_or(init);
+            let init = init.strip_prefix(JS_BINDING_ALIAS).unwrap_or(init);
+            if init.split(['.', ':', '(']).next() == Some(name) {
+                return self.lookup_binding(name, scope, line.saturating_sub(1), false);
+            }
+        }
+        Some(found)
     }
 
     /// A submodule imported by a Rust wildcard `use crate_or_mod::*;`.
@@ -1413,6 +1706,11 @@ impl<'e, 'v> FileCx<'e, 'v> {
 
     /// Field `name` of the class enclosing `scope` (or an outer class), for languages with implicit `this`.
     fn class_field_value(&self, wcx: &mut WorkerCx<'e, 'v>, scope: u32, name: &str, depth: u8) -> Option<ValueType> {
+        if let Some(ty) = self.kotlin_this_type(wcx, scope, u32::MAX, depth + 1) {
+            if let Some(v) = self.field_value(wcx, ty, name, depth + 1) {
+                return Some(v);
+            }
+        }
         let mut t = self.class_at(scope);
         for _ in 0..8 {
             let ty = t?;
@@ -1427,7 +1725,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
     /// The value a field path holds (`self.state`, `response.body`): the declared type of each field
     /// in turn, standard wrappers kept; a smart pointer or a lock guard is looked through on the way.
     fn path_value(&self, wcx: &mut WorkerCx<'e, 'v>, path: &str, scope: u32, line: u32, depth: u8) -> Option<ValueType> {
-        if depth >= 16 {
+        if depth >= 32 {
             return None;
         }
         let mut segs = path.split('.');
@@ -1438,22 +1736,108 @@ impl<'e, 'v> FileCx<'e, 'v> {
                 LangFamily::Python | LangFamily::Jvm | LangFamily::Js | LangFamily::Php | LangFamily::CSharp | LangFamily::Swift | LangFamily::Ruby
             );
         let mut value = if let Some(b) = self
-            .lookup_binding(root, scope, line, false)
+            .lookup_receiver_binding(root, scope, line)
             .filter(|b| !(implicit && self.view.text_str(b.decl_type).is_empty() && self.view.text_str(b.init_ctor).is_empty()))
         {
             self.binding_value(wcx, b, depth + 1)?
         } else if implicit {
-            self.class_at(scope).map(ValueType::plain)?
+            let cls = if self.family == LangFamily::Python { wcx.self_ty.or_else(|| self.class_at(scope)) } else { self.class_at(scope) };
+            cls.map(ValueType::plain)?
         } else if matches!(self.family, LangFamily::Jvm | LangFamily::CSharp | LangFamily::Swift) || self.lang == Lang::Cpp {
             self.class_field_value(wcx, scope, root, depth + 1)?
         } else {
             self.imported_binding_value(wcx, root, scope, depth + 1)?
         };
-        for f in segs {
+        for (idx, f) in segs.enumerate() {
             let t = value.method_receiver("")?;
-            value = self.field_value(wcx, t, f, depth + 1)?;
+            if let Some(v) = self.field_value(wcx, t, f, depth + 1) {
+                value = v;
+            } else if idx == 0 && implicit && self.family == LangFamily::Python {
+                value = self.python_decorator_field(wcx, scope, f, depth + 1)?;
+            } else {
+                return None;
+            }
         }
         Some(value)
+    }
+
+    /// Python decorator-injected `self.<field> = Expr`: look up decorators attached to the
+    /// enclosing method and check whether any decorator function binds `self.<field>`.
+    fn python_decorator_field(&self, wcx: &mut WorkerCx<'e, 'v>, mut scope: u32, field: &str, depth: u8) -> Option<ValueType> {
+        if self.family != LangFamily::Python || depth >= 32 {
+            return None;
+        }
+        loop {
+            if let Some(decs) = self.bindings.get(&(scope, "\x02dec")) {
+                for dec_b in decs {
+                    let dec_path = self.view.text_str(dec_b.init_ctor);
+                    let dec_node = if let Some((head, tail)) = dec_path.split_once('.') {
+                        let i = self.visible_import(head, 0)?;
+                        match self.e.bind_import(self.file, i as usize) {
+                            Bound::Module(tf) => match self.walk_path(Bound::Module(tf), &tail.split('.').collect::<Vec<_>>()) {
+                                Some(Bound::Node(n)) => Some(n),
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                    } else {
+                        match self.resolve_name(wcx, dec_path, Accept::Callable, 0, u32::MAX, None, false) {
+                            NameRes::Found(n, ..) => Some(n),
+                            _ => None,
+                        }
+                    };
+                    if let Some(dn) = dec_node {
+                        let owner = self.view.hot(dn).file;
+                        let cx = wcx.file_cx(self.e, owner);
+                        if let Some(fb) =
+                            self.view.bindings_of(owner).iter().find(|b| b.kind == BindKind::Field as u8 && b.node == dn && self.view.text_str(b.name) == field)
+                        {
+                            if let Some(v) = cx.binding_value(wcx, fb, depth + 1) {
+                                return Some(v);
+                            }
+                        }
+                    }
+                }
+            }
+            let Some(sc) = self.scopes.get(scope as usize) else { break };
+            if sc.parent.0 == NONE {
+                break;
+            }
+            let next = sc.parent.0.wrapping_sub(self.scope_base);
+            if next == scope {
+                break;
+            }
+            scope = next;
+        }
+        None
+    }
+
+    /// Substitute Rust type parameters in `ty` using bounds visible in `call_scope` of `self`.
+    fn subst_rust_type_params(&self, ty: &str, call_scope: u32) -> Option<String> {
+        let b = ty.as_bytes();
+        let mut out = String::with_capacity(ty.len());
+        let mut changed = false;
+        let mut i = 0;
+        while i < b.len() {
+            if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+                let start = i;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                    i += 1;
+                }
+                let word = &ty[start..i];
+                let in_path = ty[..start].ends_with("::") || ty[i..].starts_with("::") || ty[..start].ends_with('\'');
+                if !in_path && self.type_param(word, call_scope) {
+                    changed = true;
+                    out.push_str(self.type_param_bound(word, call_scope).unwrap_or("_"));
+                } else {
+                    out.push_str(word);
+                }
+            } else {
+                out.push(b[i] as char);
+                i += 1;
+            }
+        }
+        changed.then_some(out)
     }
 
     /// The declared value of field `name` of type `t` (through the hierarchy), wrappers kept.
@@ -1462,7 +1846,39 @@ impl<'e, 'v> FileCx<'e, 'v> {
             let cx = wcx.file_cx(self.e, self.view.hot(ty).file);
             let Some(cs) = cx.class_scope_for(ty) else { continue };
             if let Some(b) = cx.bindings.get(&(cs, name)).and_then(|l| l.iter().copied().find(|b| b.kind == BindKind::Field as u8)) {
-                return cx.binding_value(wcx, b, depth + 1);
+                let val = if cx.family == LangFamily::Python {
+                    let prev = wcx.self_ty.replace(t);
+                    let v = cx.binding_value(wcx, b, depth + 1);
+                    wcx.self_ty = prev;
+                    v
+                } else {
+                    cx.binding_value(wcx, b, depth + 1)
+                };
+                if let Some(v) = val {
+                    return Some(v);
+                }
+                // Rust `struct MioSource<T>(T)` + `impl<T: AioSource> Source for MioSource<T>`:
+                // substitute unbound struct type parameters using the call site's impl bounds.
+                if self.family == LangFamily::Rust {
+                    if let Some(rs) = wcx.rust_scope {
+                        let dt = self.view.text_str(b.decl_type);
+                        if !dt.is_empty() {
+                            if let Some(sub) = self.subst_rust_type_params(dt, rs) {
+                                return self.type_value(wcx, &sub, Some(ty), u32::MAX, depth + 1);
+                            }
+                        }
+                    }
+                }
+                return None;
+            }
+        }
+        // Django models inherit the implicit default manager `objects` (exposing QuerySet methods)
+        // when the model defines no custom `objects` attribute of its own.
+        if self.family == LangFamily::Python && name == "objects" {
+            if let (Some(base), Some(qs)) = (self.e.django.model, self.e.django.queryset) {
+                if t == base || self.e.ancestors(t).contains(&base) {
+                    return Some(ValueType::plain(qs));
+                }
             }
         }
         None
@@ -1479,7 +1895,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
                     receiver.wrappers.pop();
                     Some(receiver)
                 }
-                "as_ref" | "as_mut" => Some(receiver),
+                "as_ref" | "as_mut" | "as_pin_mut" | "as_pin_ref" => Some(receiver),
                 _ => None,
             };
         }
@@ -1494,25 +1910,67 @@ impl<'e, 'v> FileCx<'e, 'v> {
             }
         }
         match receiver.wrappers.last() {
-            Some(StdWrapper::Lock) if lock_method(method) => {
+            Some(StdWrapper::Lock(_)) if lock_method(method) => {
                 receiver.wrappers.pop();
                 receiver.wrappers.push(StdWrapper::Guard);
                 return Some(receiver);
             }
-            Some(StdWrapper::Lock) => return None,
+            Some(StdWrapper::Lock(_)) => return None,
             // std's `lock()` returns a `LockResult` of the guard
             Some(StdWrapper::Guard) if matches!(method, "unwrap" | "expect" | "unwrap_or_else") => return Some(receiver),
             _ => {}
         }
         let node = receiver.method_receiver(method)?;
         if let Some((m, owner)) = self.rust_member(wcx, node, method) {
-            return self.returned_value(wcx, m, Some(owner), depth + 1);
+            if let Some(ret) = self.returned_value(wcx, m, Some(owner), depth + 1) {
+                return Some(ret);
+            }
+        }
+        if let Some(inner) = receiver.deref_inner().filter(|&i| i != node) {
+            if let Some((m, owner)) = self.rust_member(wcx, inner, method) {
+                if let Some(ret) = self.returned_value(wcx, m, Some(owner), depth + 1) {
+                    return Some(ret);
+                }
+            }
+        }
+        if self.family == LangFamily::Rust {
+            if let Some(m) = self.rust_imported_trait_member(node, wcx.rust_scope.unwrap_or(0), method) {
+                if let Some(ret) = self.returned_value(wcx, m, Some(node), depth + 1) {
+                    return Some(ret);
+                }
+            }
+        }
+        if self.lang == Lang::Kotlin {
+            if matches!(method, "apply" | "also") {
+                return Some(receiver);
+            }
+            if let Some(ext) = self.kotlin_extension_node(wcx, Some(node), None, method, 0, None) {
+                return self.returned_value(wcx, ext, Some(node), depth + 1);
+            }
+        }
+        // Rust transparent receiver-preserving steps (`Pin::as_mut`, `pin_project`'s `.project()`,
+        // `Clone::clone`, `AsRef`/`AsMut`) when no explicit differing return type exists.
+        if self.family == LangFamily::Rust
+            && matches!(method, "clone" | "as_mut" | "as_ref" | "project" | "project_ref" | "as_pin_mut" | "as_pin_ref")
+            && receiver.wrappers.iter().all(|w| matches!(w, StdWrapper::Pointer | StdWrapper::Guard))
+        {
+            return Some(receiver);
         }
         if self.family == LangFamily::Python {
             // `cls.client_class()` where `client_class = Client`: calling a class-valued attribute instantiates it
             if let Some(t) = self.field_value(wcx, node, method, depth + 1).and_then(|fv| fv.receiver()) {
                 if kind_of(self.view, t).is_type() {
                     return Some(ValueType::plain(t));
+                }
+            }
+            if let Some(dw) = self.e.django.db_wrapper {
+                if node == dw || self.e.ancestors(node).contains(&dw) {
+                    if method == "schema_editor" {
+                        return self.e.django.schema_editor.map(ValueType::plain);
+                    }
+                    if matches!(method, "cursor" | "chunked_cursor") {
+                        return self.e.django.cursor.map(ValueType::plain);
+                    }
                 }
             }
         }
@@ -1563,6 +2021,187 @@ impl<'e, 'v> FileCx<'e, 'v> {
             found = Some(target);
         }
         found
+    }
+
+    /// Whether Rust type `t` has `impl<T> Deref for W<T> { type Target = T; }` (dereferencing to
+    /// a generic type parameter rather than a fixed concrete type).
+    fn is_generic_deref(&self, wcx: &mut WorkerCx<'e, 'v>, t: NodeIdx) -> bool {
+        let Some(entries) = self.e.derefs.get(self.view.node(t).name()) else { return false };
+        for &(f, b) in entries {
+            let cx = wcx.file_cx(self.e, f);
+            if cx.lookup_type(wcx, self.view.text_str(b.name)) != TypeRes::Node(t) {
+                continue;
+            }
+            let target = self.view.text_str(b.decl_type).trim();
+            if target == "_" || (target.len() == 1 && target.as_bytes()[0].is_ascii_uppercase()) {
+                return true;
+            }
+            let sc = b.scope.0.wrapping_sub(cx.scope_base);
+            if !target.contains("::") && cx.type_param(target, sc) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Resolve the inner payload type of a Rust call returning a generic `Deref` wrapper
+    /// (`pub fn spawn<T>(t: T) -> Spawn<T>` vs `pub fn send(req: Request) -> Wrapper<Response>`).
+    /// Only substitutes the call argument when the wrapper's return-type argument is a type param.
+    fn rust_deref_call_inner(&self, wcx: &mut WorkerCx<'e, 'v>, callee: &str, args: &str, scope: u32, line: u32, depth: u8) -> Option<ValueType> {
+        let fn_node = if callee.contains("::") && !callee.contains('.') {
+            self.rust_callee(wcx, callee, scope, line)
+        } else if !callee.contains(['.', ':']) {
+            match self.resolve_name(wcx, callee, Accept::Callable, scope, line, None, true) {
+                NameRes::Found(n, ..) => Some(n),
+                _ => None,
+            }
+        } else {
+            None
+        }?;
+        let raw_ret = self
+            .e
+            .return_types
+            .get(&fn_node)
+            .map(|b| self.view.text_str(b.decl_type))
+            .filter(|s| s.contains('<'))
+            .or_else(|| self.view.node(fn_node).return_type())?;
+        let open = raw_ret.find('<')?;
+        let close = raw_ret.rfind('>')?;
+        if close <= open + 1 {
+            return None;
+        }
+        let inner_args = &raw_ret[open + 1..close];
+        let mut nest = 0u32;
+        let mut end = inner_args.len();
+        for (i, ch) in inner_args.char_indices() {
+            match ch {
+                '<' | '(' | '[' => nest += 1,
+                '>' | ')' | ']' => nest = nest.saturating_sub(1),
+                ',' if nest == 0 => {
+                    end = i;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let first_arg = inner_args[..end].trim();
+        if first_arg.is_empty() {
+            return None;
+        }
+        let fn_cx = wcx.file_cx(self.e, self.view.hot(fn_node).file);
+        let fn_scope = fn_cx.scope_at(self.view.node(fn_node).start_line(), self.view.node(fn_node).start_col());
+        let is_param = first_arg == "_" || (!first_arg.contains("::") && fn_cx.type_param(first_arg, fn_scope));
+        if is_param {
+            (!args.is_empty()).then(|| self.expression_value(wcx, args, scope, line, depth + 1)).flatten()
+        } else {
+            fn_cx.type_value(wcx, first_arg, None, u32::MAX, depth + 1)
+        }
+    }
+
+    /// Whether Rust receiver `recv_ty` satisfies trait `tr` directly or through a blanket impl
+    /// (`impl<T: Base> tr for T {}`).
+    fn rust_trait_applies(&self, recv_ty: NodeIdx, tr: NodeIdx) -> bool {
+        let view = self.view;
+        if recv_ty == tr || self.e.ancestors(recv_ty).contains(&tr) {
+            return true;
+        }
+        let Some(bases) = self.e.blanket_traits.get(view.node(tr).name()) else {
+            return false;
+        };
+        let recv_name = view.node(recv_ty).name();
+        let recv_is_trait = kind_of(view, recv_ty) == NodeKind::Trait;
+        let ancestors = self.e.ancestors(recv_ty);
+        for &base in bases {
+            if recv_is_trait && recv_name == base {
+                return true;
+            }
+            if ancestors.iter().any(|&a| view.node(a).name() == base) {
+                return true;
+            }
+            let rf = view.hot(recv_ty).file;
+            if view
+                .refs_of_file(rf)
+                .iter()
+                .any(|r| r.from == recv_ty && RefKind::from_wire(r.kind) == Some(RefKind::Edge(EdgeKind::Implements)) && view.name_str(r.tail) == base)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// A unique applicable method defined by a Rust trait explicitly imported (or declared) in this
+    /// file. Only applies traits that `recv_ty` implements directly or via a blanket bound.
+    fn rust_imported_trait_member(&self, recv_ty: NodeIdx, scope: u32, method: &str) -> Option<NodeIdx> {
+        if self.family != LangFamily::Rust {
+            return None;
+        }
+        let view = self.view;
+        let mut active_scopes: SmallVec<[u32; 8]> = SmallVec::new();
+        let mut cur = scope;
+        loop {
+            active_scopes.push(cur);
+            let Some(sc) = self.scopes.get(cur as usize) else { break };
+            if sc.parent.0 == NONE {
+                break;
+            }
+            let next = sc.parent.0.wrapping_sub(self.scope_base);
+            if next == cur {
+                break;
+            }
+            cur = next;
+        }
+        if !active_scopes.contains(&0) {
+            active_scopes.push(0);
+        }
+        let mut traits: SmallVec<[NodeIdx; 8]> = SmallVec::new();
+        let mut push_trait = |n: NodeIdx| {
+            if kind_of(view, n) == NodeKind::Trait && !traits.contains(&n) {
+                traits.push(n);
+            }
+        };
+        for (i, imp) in self.imports.iter().enumerate() {
+            let imp_sc = imp.scope.0.wrapping_sub(self.scope_base);
+            if !active_scopes.contains(&imp_sc) {
+                continue;
+            }
+            if let Bound::Node(n) = self.e.bind_import(self.file, i) {
+                push_trait(n);
+            }
+        }
+        for &wi in &self.wildcards {
+            if let Some(ImportTarget::File(tf)) = self.e.imp_targets[self.file.idx()].get(wi as usize).copied() {
+                for (&name, &entry) in &self.e.exports[tf.idx()] {
+                    match entry {
+                        crate::ExportEntry::Node(n) => push_trait(n),
+                        crate::ExportEntry::Re(..) => {
+                            if let Some(Bound::Node(n)) = self.e.lookup_export(tf, name, 0) {
+                                push_trait(n);
+                            }
+                        }
+                        crate::ExportEntry::Module(_) => {}
+                    }
+                }
+            }
+        }
+        for n in view.nodes_in_file(self.file) {
+            push_trait(NodeIdx(n));
+        }
+        let mut found: SmallVec<[NodeIdx; 2]> = SmallVec::new();
+        for tr in traits {
+            if !self.rust_trait_applies(recv_ty, tr) {
+                continue;
+            }
+            if let Some(m) = self.e.find_member(tr, method) {
+                if matches!(kind_of(view, m), NodeKind::Method | NodeKind::Function) && !found.contains(&m) {
+                    found.push(m);
+                    if found.len() > 1 {
+                        return None;
+                    }
+                }
+            }
+        }
+        (found.len() == 1).then(|| found[0])
     }
 
     /// Declared type of field `name` of type `t` (through the hierarchy).
@@ -2248,6 +2887,14 @@ impl<'e, 'v> FileCx<'e, 'v> {
                 }
                 return NameRes::Local;
             }
+            // Kotlin `.apply { ... }` / `.run { ... }` / `with(x) { ... }` / extension functions
+            // / DSL lambdas rebind `this`: bare member calls inside the body resolve on that receiver first.
+            if let Some(t) = self.kotlin_this_type(wcx, scope, line, 0) {
+                let o = self.member_call(wcx, t, &[], name, 90, args.map(|(a, r)| (Some(a), r)));
+                if o.status == status::RESOLVED {
+                    return NameRes::Found(NodeIdx(o.target), o.by, o.conf);
+                }
+            }
             // members of the enclosing class are visible by bare name in these languages
             if self.family == LangFamily::Php {
                 if let Some(m) = self.php_bare_member(from, name) {
@@ -2375,7 +3022,7 @@ impl<'e, 'v> FileCx<'e, 'v> {
                         }
                     }
                 }
-                ImportTarget::Node(c) if imp.kind == ImportKind::Static as u8 => {
+                ImportTarget::Node(c) if imp.kind == ImportKind::Static as u8 || self.lang == Lang::Kotlin => {
                     if let Some(m) = e.find_member(c, name) {
                         return NameRes::Found(m, by::IMPORT, 85);
                     }
@@ -2445,9 +3092,9 @@ impl<'e, 'v> FileCx<'e, 'v> {
                 t = ft;
                 continue;
             }
-            // Rust `worker: Arc<Worker>`: the value behind the smart pointer, though the pointer's
-            // own methods (`clone`) stay the pointer's
-            if self.family == LangFamily::Rust {
+            // Rust `worker: Arc<Worker>` (autoderef through smart pointers) and Python dynamic
+            // properties/Django `Model.objects` (`field_value` preserves `self` subclass + defaults).
+            if matches!(self.family, LangFamily::Rust | LangFamily::Python) {
                 if let Some(v) = self.field_value(wcx, t, f, 0) {
                     match v.method_receiver(if i + 1 == path.len() { method } else { "" }) {
                         Some(ft) => t = ft,
@@ -2660,6 +3307,9 @@ impl<'e, 'v> FileCx<'e, 'v> {
                 _ => Outcome::st(status::NO_CANDIDATE),
             },
             Bound::Node(n) => {
+                if let Some(proxy) = self.django_proxy_target(n) {
+                    return self.member_of(wcx, proxy, &[], method, 88);
+                }
                 if self.view.node(n).kind().is_type() {
                     self.member_of(wcx, n, &[], method, 90)
                 } else {
@@ -2677,6 +3327,29 @@ impl<'e, 'v> FileCx<'e, 'v> {
             }
             _ => Outcome::st(status::NO_CANDIDATE),
         }
+    }
+
+    /// Resolve a call into a Rust inline `mod name { ... }` using the module's line span so
+    /// sibling inline modules (`mod a { fn run() }` vs `mod b { fn run() }`) stay distinct.
+    fn rust_inline_mod_call(&self, wcx: &mut WorkerCx<'e, 'v>, tf: FileId, mod_binding: &BindingRec, path: &[&str], method: &str) -> Outcome {
+        let span = self.view.text_str(mod_binding.init_ctor);
+        let Some((lo, hi)) = span.split_once(':').and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))) else {
+            return Outcome::st(status::NO_CANDIDATE);
+        };
+        let in_span = |n: NodeIdx| {
+            let line = self.view.node(n).start_line();
+            self.view.hot(n).file == tf && line >= lo && line <= hi
+        };
+        if path.is_empty() {
+            if let Some(n) = self.view.by_name(method).find(|&n| in_span(n) && Accept::Callable.ok(kind_of(self.view, n))) {
+                return Outcome::found(n, by::IMPORT, 92);
+            }
+            return Outcome::st(status::NO_CANDIDATE);
+        }
+        if let Some(ty) = self.view.by_name(path[0]).find(|&n| in_span(n) && self.holds_members(kind_of(self.view, n))) {
+            return self.member_of(wcx, ty, &path[1..], method, 90);
+        }
+        Outcome::st(status::NO_CANDIDATE)
     }
 
     fn is_call(r: &RefRec) -> bool {
@@ -2726,9 +3399,23 @@ impl<'e, 'v> FileCx<'e, 'v> {
                 _ => Outcome::st(status::NO_CANDIDATE),
             };
         }
+        // Python subscript receiver (`connections[DEFAULT_DB_ALIAS].schema_editor()`, `caches[alias].set()`):
+        if self.family == LangFamily::Python {
+            if let Some((base, _)) = root.split_once('[').filter(|_| root.ends_with(']')) {
+                if !base.is_empty() {
+                    if let Some(t) = self.expression_value(wcx, &format!("{base}[]"), scope, r.line, 0).and_then(|v| v.receiver()) {
+                        return self.member_call(wcx, t, path, method, 88, call);
+                    }
+                }
+            }
+        }
         // (a) a local variable, parameter or field; C++ `a::f` never reads one called `a`
         let scoped_root = self.lang == Lang::Cpp && r_name_is_scoped(view.text_str(r.name));
-        if let Some(b) = self.lookup_binding(root, scope, r.line, false).filter(|_| !scoped_root) {
+        let binding = (!scoped_root).then(|| self.lookup_receiver_binding(root, scope, r.line)).flatten();
+        if let Some(b) = binding {
+            if self.family == LangFamily::Rust && b.scope.0 == self.scope_base && self.view.text_str(b.decl_type) == "\x03mod" {
+                return self.rust_inline_mod_call(wcx, self.file, b, path, method);
+            }
             if b.kind != BindKind::LocalFn as u8 {
                 // With fields, the final method belongs to the last field, not
                 // to the root pointer (arc.field.clone() may call Field::clone).
@@ -2736,16 +3423,38 @@ impl<'e, 'v> FileCx<'e, 'v> {
                 let resolved_val = self.go_concrete_var_value(wcx, b).or_else(|| self.binding_value(wcx, b, 0));
                 return match resolved_val {
                     Some(t) if t.method_receiver(receiver_method).is_some() => {
-                        let o = self.member_call(wcx, t.method_receiver(receiver_method).unwrap(), path, method, 90, call);
+                        let recv = t.method_receiver(receiver_method).unwrap();
+                        let o = self.member_call(wcx, recv, path, method, 90, call);
                         if o.status == status::RESOLVED {
-                            o
+                            return o;
+                        }
+                        if let Some(inner) = t.deref_inner().filter(|&i| i != recv) {
+                            let o2 = self.member_call(wcx, inner, path, method, 88, call);
+                            if o2.status == status::RESOLVED {
+                                return o2;
+                            }
+                        }
+                        if self.family == LangFamily::Rust && path.is_empty() {
+                            if let Some(m) = self.rust_imported_trait_member(recv, scope, method) {
+                                return Outcome::found(m, by::IMPORT, 85);
+                            }
+                        }
+                        if self.lang == Lang::Kotlin && path.is_empty() {
+                            self.kotlin_extension_node(wcx, Some(recv), None, method, scope, args.map(|a| (a, r)))
+                                .map_or(Outcome::st(status::NO_CANDIDATE), |n| Outcome::found(n, by::IMPORT, 88))
                         } else {
                             Outcome::st(status::NO_CANDIDATE)
                         }
                     }
                     Some(_) => Outcome::st(status::NO_CANDIDATE),
                     None => {
-                        if !self.view.text_str(b.decl_type).is_empty() {
+                        let decl = self.view.text_str(b.decl_type);
+                        if self.lang == Lang::Kotlin && path.is_empty() {
+                            if let Some(ext) = self.kotlin_extension_node(wcx, None, (!decl.is_empty()).then_some(decl), method, scope, args.map(|a| (a, r))) {
+                                return Outcome::found(ext, by::IMPORT, 88);
+                            }
+                        }
+                        if !decl.is_empty() {
                             return Outcome::st(status::NO_CANDIDATE);
                         }
                         if path.is_empty() {
@@ -2826,6 +3535,9 @@ impl<'e, 'v> FileCx<'e, 'v> {
                     };
                 }
                 Bound::Node(n) => {
+                    if let Some(proxy) = self.django_proxy_target(n) {
+                        return self.member_call(wcx, proxy, path, method, 88, call);
+                    }
                     let k = kind_of(view, n);
                     if k.is_type() {
                         return self.member_call(wcx, n, path, method, 92, call);
@@ -2890,6 +3602,36 @@ impl<'e, 'v> FileCx<'e, 'v> {
             }
             if let Some(mf) = self.e.submodule(self.file, root).or_else(|| self.wildcard_submodule(root)) {
                 return self.in_module(wcx, mf, path, method);
+            }
+            // Inline `pub mod foo { pub fn bar() }` brought into scope via wildcard `use crate::m::*;`
+            for &wi in &self.wildcards {
+                if let Some(ImportTarget::File(tf)) = self.e.imp_targets[self.file.idx()].get(wi as usize).copied() {
+                    if let Some(Bound::Node(m)) = self.e.lookup_export(tf, root, 0) {
+                        if kind_of(view, m) == NodeKind::Module {
+                            let o = self.member_call(wcx, m, path, method, 90, call);
+                            if o.status == status::RESOLVED {
+                                return o;
+                            }
+                        }
+                    }
+                    let tcx = wcx.file_cx(self.e, tf);
+                    if let Some(mb) = tcx.file_binding(root).filter(|b| self.view.text_str(b.decl_type) == "\x03mod") {
+                        let o = self.rust_inline_mod_call(wcx, tf, mb, path, method);
+                        if o.status == status::RESOLVED {
+                            return o;
+                        }
+                    }
+                }
+            }
+            if path.is_empty() {
+                if let Some(bound) = self.type_param_bound(root, scope) {
+                    if let Some(t) = self.type_value(wcx, bound, None, r.line, 0).and_then(|v| v.receiver()) {
+                        let o = self.member_call(wcx, t, &[], method, 90, call);
+                        if o.status == status::RESOLVED {
+                            return o;
+                        }
+                    }
+                }
             }
         }
         match self.lookup_type(wcx, root) {
@@ -2970,14 +3712,53 @@ impl<'e, 'v> FileCx<'e, 'v> {
         call: Option<(Option<&CallArgs<'v>>, &RefRec)>,
     ) -> Option<Outcome> {
         let view = self.view;
+        let scope = self.scope_at(r.line, r.col);
+        let args = call.and_then(|(a, rr)| a.map(|a| (a, rr)));
+        if let Some(ty) = self.kotlin_this_type(wcx, scope, r.line, 0) {
+            if let Some(ft) = self.field_type(wcx, ty, root) {
+                let o = self.member_call(wcx, ft, path, method, 90, call);
+                if o.status == status::RESOLVED {
+                    return Some(o);
+                }
+                if path.is_empty() {
+                    if let Some(ext) = self.kotlin_extension_node(wcx, Some(ft), None, method, scope, args) {
+                        return Some(Outcome::found(ext, by::IMPORT, 88));
+                    }
+                }
+                return Some(Outcome::st(status::NO_CANDIDATE));
+            }
+            if let Some(declared) = self.field_decl_type(wcx, ty, root) {
+                if path.is_empty() {
+                    if let Some(ext) = self.kotlin_extension_node(wcx, None, (!declared.is_empty()).then_some(declared.as_str()), method, scope, args) {
+                        return Some(Outcome::found(ext, by::IMPORT, 88));
+                    }
+                }
+                if !declared.is_empty() {
+                    return Some(Outcome::st(status::EXTERNAL));
+                }
+            }
+        }
         let mut t = self.enclosing_type(r.from);
         for _ in 0..8 {
             let ty = t?;
             if let Some(ft) = self.field_type(wcx, ty, root) {
                 let o = self.member_call(wcx, ft, path, method, 90, call);
-                return Some(if o.status == status::RESOLVED { o } else { Outcome::st(status::NO_CANDIDATE) });
+                if o.status == status::RESOLVED {
+                    return Some(o);
+                }
+                if self.lang == Lang::Kotlin && path.is_empty() {
+                    if let Some(ext) = self.kotlin_extension_node(wcx, Some(ft), None, method, scope, args) {
+                        return Some(Outcome::found(ext, by::IMPORT, 88));
+                    }
+                }
+                return Some(Outcome::st(status::NO_CANDIDATE));
             }
             if let Some(declared) = self.field_decl_type(wcx, ty, root) {
+                if self.lang == Lang::Kotlin && path.is_empty() {
+                    if let Some(ext) = self.kotlin_extension_node(wcx, None, (!declared.is_empty()).then_some(declared.as_str()), method, scope, args) {
+                        return Some(Outcome::found(ext, by::IMPORT, 88));
+                    }
+                }
                 // declared, not a project type: nothing in the project is its member
                 return (!declared.is_empty()).then(|| Outcome::st(status::EXTERNAL));
             }
@@ -2999,8 +3780,12 @@ impl<'e, 'v> FileCx<'e, 'v> {
     }
 
     fn call_this(&self, wcx: &mut WorkerCx<'e, 'v>, r: &RefRec, kw: &str, fields: &[&str], method: &str, args: Option<&CallArgs<'v>>) -> Outcome {
+        let scope = self.scope_at(r.line, r.col);
+        // Kotlin `.apply { this.m() }` / extension functions / DSL lambdas rebind `this`.
+        let rebound_this = self.kotlin_this_type(wcx, scope, r.line, 0);
         // in a function given to an ES5 constructor's prototype, `this` is the constructor's object
-        let t = self.enclosing_type(r.from).or_else(|| self.e.proto_owner.get(&r.from).copied().filter(|_| self.family == LangFamily::Js));
+        let t =
+            rebound_this.or_else(|| self.enclosing_type(r.from)).or_else(|| self.e.proto_owner.get(&r.from).copied().filter(|_| self.family == LangFamily::Js));
         let Some(t) = t else {
             if self.family == LangFamily::Js && fields.is_empty() {
                 if let Some(n) = self.assigned_this_member(r, method) {
@@ -3021,6 +3806,19 @@ impl<'e, 'v> FileCx<'e, 'v> {
         let o = self.member_call(wcx, t, fields, method, 95, Some((args, r)));
         if o.status == status::RESOLVED {
             return o;
+        }
+        if self.family == LangFamily::Python && !fields.is_empty() {
+            if let Some(ft) = self.python_decorator_field(wcx, scope, fields[0], 0).and_then(|v| v.receiver()) {
+                let o = self.member_call(wcx, ft, &fields[1..], method, 90, Some((args, r)));
+                if o.status == status::RESOLVED {
+                    return o;
+                }
+            }
+        }
+        if self.lang == Lang::Kotlin && fields.is_empty() {
+            if let Some(ext) = self.kotlin_extension_node(wcx, Some(t), None, method, scope, args.map(|a| (a, r))) {
+                return Outcome::found(ext, by::IMPORT, 88);
+            }
         }
         // `self.m()` in `extension Outer.Inner`: the nested declaration's member
         if let Some(d) = self.is_swift_extension(t).then(|| self.swift_declaration(t)).flatten().filter(|d| *d != t) {
@@ -3091,22 +3889,217 @@ impl<'e, 'v> FileCx<'e, 'v> {
     }
 
     fn call_result(&self, wcx: &mut WorkerCx<'e, 'v>, r: &RefRec, inner: &str, method: &str, args: Option<&CallArgs<'v>>) -> Outcome {
+        let scope = self.scope_at(r.line, r.col);
         // type produced by calling `inner`
-        let value = match self.call_value(wcx, inner, self.scope_at(r.line, r.col), r.line, 0) {
+        let value = match self.call_value(wcx, inner, scope, r.line, 0) {
             Some(value) => Some(value),
             None => {
                 // `inner` may be a method of a typed receiver: resolve it as a call first (its
                 // own arguments are not this reference's)
                 let o = self.call_name_with(wcx, r, inner, None);
-                if o.status != status::RESOLVED {
-                    return Outcome::st(status::NO_CANDIDATE);
+                if o.status == status::RESOLVED {
+                    let n = NodeIdx(o.target);
+                    self.returned_value(wcx, n, self.enclosing_type(n), 0)
+                } else {
+                    None
                 }
-                let n = NodeIdx(o.target);
-                self.returned_value(wcx, n, self.enclosing_type(n), 0)
             }
         };
-        let Some(t) = value.and_then(|v| v.method_receiver(method)) else { return Outcome::st(status::NO_CANDIDATE) };
-        self.member_call(wcx, t, &[], method, 85, Some((args, r)))
+        if let Some(t) = value.as_ref().and_then(|v| v.method_receiver(method)) {
+            let o = self.member_call(wcx, t, &[], method, 85, Some((args, r)));
+            if o.status == status::RESOLVED {
+                return o;
+            }
+            if let Some(inner) = value.as_ref().and_then(|v| v.deref_inner()).filter(|&i| i != t) {
+                let o2 = self.member_call(wcx, inner, &[], method, 85, Some((args, r)));
+                if o2.status == status::RESOLVED {
+                    return o2;
+                }
+            }
+            if self.family == LangFamily::Rust {
+                if let Some(m) = self.rust_imported_trait_member(t, scope, method) {
+                    return Outcome::found(m, by::IMPORT, 85);
+                }
+            }
+            if self.lang == Lang::Kotlin {
+                if let Some(ext) = self.kotlin_extension_node(wcx, Some(t), None, method, scope, args.map(|a| (a, r))) {
+                    return Outcome::found(ext, by::IMPORT, 85);
+                }
+            }
+            return o;
+        }
+        if self.lang == Lang::Kotlin {
+            if let Some(ext) = self.kotlin_extension_node(wcx, None, None, method, scope, args.map(|a| (a, r))) {
+                return Outcome::found(ext, by::IMPORT, 85);
+            }
+        }
+        Outcome::st(status::NO_CANDIDATE)
+    }
+
+    fn kotlin_ext_receiver(&self, n: NodeIdx, method: &str) -> Option<&'v str> {
+        let view = self.view;
+        if kind_of(view, n) != NodeKind::Method || view.file(view.hot(n).file).lang() != Lang::Kotlin {
+            return None;
+        }
+        let q = view.node(n).qname();
+        let recv = q.strip_suffix(method)?.strip_suffix("::")?;
+        match view.node(n).parent() {
+            None => Some(recv),
+            Some(p) if matches!(kind_of(view, p), NodeKind::File | NodeKind::Namespace) => Some(recv),
+            Some(p) if view.node(p).qname() != recv => Some(recv),
+            _ => None,
+        }
+    }
+
+    /// A Kotlin extension method `fun Recv.method(...)` visible in `scope` (explicit import,
+    /// same file, same package, or wildcard import), narrowed by receiver type when known.
+    fn kotlin_extension_node(
+        &self,
+        wcx: &mut WorkerCx<'e, 'v>,
+        receiver_ty: Option<NodeIdx>,
+        receiver_decl: Option<&str>,
+        method: &str,
+        scope: u32,
+        args: Option<(&CallArgs<'v>, &RefRec)>,
+    ) -> Option<NodeIdx> {
+        if self.lang != Lang::Kotlin {
+            return None;
+        }
+        let view = self.view;
+        let mut cands: SmallVec<[NodeIdx; 4]> = SmallVec::new();
+        let push_unique = |cands: &mut SmallVec<[NodeIdx; 4]>, n: NodeIdx| {
+            if !cands.contains(&n) {
+                cands.push(n);
+            }
+        };
+        // 1. Explicit import (`import pkg.ext` or `import pkg.Cls.Companion.ext`)
+        if let Some(i) = self.visible_import(method, scope) {
+            if let Bound::Node(n) = self.e.bind_import(self.file, i as usize) {
+                if self.kotlin_ext_receiver(n, method).is_some() {
+                    let parent = view.node(n).parent();
+                    let owner_pkg = self.e.modules.pkg_of(view.hot(n).file);
+                    let top_level = parent.is_none_or(|p| matches!(kind_of(view, p), NodeKind::File | NodeKind::Namespace));
+                    for m in view.by_name(method) {
+                        if self.kotlin_ext_receiver(m, method).is_none() {
+                            continue;
+                        }
+                        let same_group = if top_level {
+                            self.e.modules.pkg_of(view.hot(m).file) == owner_pkg
+                                && view.node(m).parent().is_none_or(|p| matches!(kind_of(view, p), NodeKind::File | NodeKind::Namespace))
+                        } else {
+                            view.node(m).parent() == parent
+                        };
+                        if same_group {
+                            push_unique(&mut cands, m);
+                        }
+                    }
+                }
+            }
+        }
+        // 2. Same file top-level extension
+        if cands.is_empty() {
+            for m in view.by_name(method) {
+                if view.hot(m).file == self.file
+                    && self.kotlin_ext_receiver(m, method).is_some()
+                    && view.node(m).parent().is_none_or(|p| matches!(kind_of(view, p), NodeKind::File | NodeKind::Namespace))
+                {
+                    push_unique(&mut cands, m);
+                }
+            }
+        }
+        // 3. Same package top-level extension
+        if cands.is_empty() && self.pkg.0 != NONE {
+            for m in view.by_name(method) {
+                if self.e.modules.pkg_of(view.hot(m).file) == self.pkg
+                    && self.kotlin_ext_receiver(m, method).is_some()
+                    && view.node(m).parent().is_none_or(|p| matches!(kind_of(view, p), NodeKind::File | NodeKind::Namespace))
+                {
+                    push_unique(&mut cands, m);
+                }
+            }
+        }
+        // 4. Wildcard-imported package or companion extension
+        if cands.is_empty() {
+            for &wi in &self.wildcards {
+                match self.e.imp_targets[self.file.idx()].get(wi as usize).copied() {
+                    Some(ImportTarget::Pkg(p)) => {
+                        for m in view.by_name(method) {
+                            if self.e.modules.pkg_of(view.hot(m).file) == p
+                                && self.kotlin_ext_receiver(m, method).is_some()
+                                && view.node(m).parent().is_none_or(|pr| matches!(kind_of(view, pr), NodeKind::File | NodeKind::Namespace))
+                            {
+                                push_unique(&mut cands, m);
+                            }
+                        }
+                    }
+                    Some(ImportTarget::Node(owner)) => {
+                        for m in view.by_name(method) {
+                            if view.node(m).parent() == Some(owner) && self.kotlin_ext_receiver(m, method).is_some() {
+                                push_unique(&mut cands, m);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if cands.is_empty() {
+            return None;
+        }
+        // Narrow by receiver type when known (either a resolved project type or declared type name).
+        let mut recv_names: SmallVec<[&str; 4]> = SmallVec::new();
+        if let Some(ty) = receiver_ty {
+            recv_names.push(view.node(ty).name());
+            for a in self.e.ancestors(ty) {
+                recv_names.push(view.node(a).name());
+            }
+        } else if let Some(dt) = receiver_decl {
+            let simple = dt.split('<').next().unwrap_or(dt).trim().trim_end_matches('?');
+            if let Some(tail) = simple.rsplit('.').next().filter(|s| !s.is_empty()) {
+                recv_names.push(tail);
+            }
+        }
+        if !recv_names.is_empty() {
+            let exact: SmallVec<[NodeIdx; 4]> = cands
+                .iter()
+                .copied()
+                .filter(|&m| {
+                    self.kotlin_ext_receiver(m, method).is_some_and(|r| {
+                        let tail = r.rsplit('.').next().unwrap_or(r);
+                        recv_names.iter().any(|&rn| rn == r || rn == tail)
+                    })
+                })
+                .collect();
+            if !exact.is_empty() {
+                cands = exact;
+            } else {
+                let generic: SmallVec<[NodeIdx; 4]> = cands
+                    .iter()
+                    .copied()
+                    .filter(|&m| self.kotlin_ext_receiver(m, method).is_some_and(|r| r == "Any" || (r.len() == 1 && r.as_bytes()[0].is_ascii_uppercase())))
+                    .collect();
+                if !generic.is_empty() {
+                    cands = generic;
+                } else if receiver_ty.is_some() {
+                    // A project type may implement an external interface (e.g. `Closeable`) not in
+                    // `ancestors`; allow only a unique non-project-type extension receiver.
+                    if cands.len() != 1 || self.kotlin_ext_receiver(cands[0], method).is_some_and(|r| matches!(self.lookup_type(wcx, r), TypeRes::Node(_))) {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            }
+        }
+        if cands.len() == 1 {
+            return Some(cands[0]);
+        }
+        if let Some((a, r)) = args {
+            if let Some(pick) = self.pick_overload(wcx, &cands, a, r) {
+                return Some(pick);
+            }
+        }
+        None
     }
 
     /// A namespace-qualified callable (`fmt::detail::write`, `Ns.Util.Run`, `Rack::Utils.escape`)
@@ -3518,16 +4511,19 @@ impl<'e, 'v> FileCx<'e, 'v> {
         let normalized = normalize_call_name(self.family, name);
         let name = normalized.as_ref();
         let args = CallArgs::of(self.view, r);
-        let o = if self.family != LangFamily::Rust || !name.contains("self") {
+        let o = if self.family != LangFamily::Rust {
             self.call_name_with(wcx, r, name, args.as_ref())
         } else {
-            // `self.state.lock()`: `self` is the type the calling method belongs to
+            // `self.state.lock()` or `let me = self.as_mut().project(); me.stream.poll_next()`:
+            // keep `self`'s enclosing type and call-site scope available for binding & field resolution.
             let previous = wcx.self_ty.replace(self.enclosing_type(r.from).unwrap_or(NodeIdx(NONE)));
             if wcx.self_ty == Some(NodeIdx(NONE)) {
                 wcx.self_ty = None;
             }
+            let prev_scope = wcx.rust_scope.replace(self.scope_at(r.line, r.col));
             let result = self.call_name_with(wcx, r, name, args.as_ref());
             wcx.self_ty = previous;
+            wcx.rust_scope = prev_scope;
             result
         };
         if self.family == LangFamily::Js
@@ -3576,6 +4572,14 @@ impl<'e, 'v> FileCx<'e, 'v> {
             }
             Shape::This { kw, fields, method } if self.family == LangFamily::Js && kw != "this" => self.call_member(wcx, r, kw, &fields, method, args),
             Shape::This { kw, fields, method } => self.call_this(wcx, r, kw, &fields, method, args),
+            Shape::Super { .. } if self.family == LangFamily::Rust && name.starts_with("super::") => {
+                let segs: SmallVec<[&str; 6]> = name.split("::").filter(|s| !s.is_empty()).collect();
+                if let Some((&method, mid)) = segs[1..].split_last() {
+                    self.call_member(wcx, r, "super", mid, method, args)
+                } else {
+                    Outcome::st(status::NO_CANDIDATE)
+                }
+            }
             Shape::Super { method } => self.call_super(wcx, r, method, args),
             Shape::New { class, method } => match self.lookup_type_at(wcx, class, r.line) {
                 TypeRes::Node(t) => self.member_call(wcx, t, &[], method, 90, Some((args, r))),
@@ -3587,9 +4591,35 @@ impl<'e, 'v> FileCx<'e, 'v> {
             },
             Shape::CallResult { inner, method } => self.js_first_overload(self.call_result(wcx, r, inner, method, args)),
             Shape::ValueResult { inner, method } => {
-                let value = self.expression_value(wcx, inner, self.scope_at(r.line, r.col), r.line, 0);
-                match value.and_then(|v| v.method_receiver(method)) {
-                    Some(t) => self.js_first_overload(self.member_call(wcx, t, &[], method, 85, Some((args, r)))),
+                let scope = self.scope_at(r.line, r.col);
+                let value = self.expression_value(wcx, inner, scope, r.line, 0);
+                match value.as_ref().and_then(|v| v.method_receiver(method)) {
+                    Some(t) => {
+                        let o = self.js_first_overload(self.member_call(wcx, t, &[], method, 85, Some((args, r))));
+                        if o.status == status::RESOLVED {
+                            return o;
+                        }
+                        if let Some(inner) = value.as_ref().and_then(|v| v.deref_inner()).filter(|&i| i != t) {
+                            let o2 = self.member_call(wcx, inner, &[], method, 85, Some((args, r)));
+                            if o2.status == status::RESOLVED {
+                                return o2;
+                            }
+                        }
+                        if self.family == LangFamily::Rust {
+                            if let Some(m) = self.rust_imported_trait_member(t, scope, method) {
+                                return Outcome::found(m, by::IMPORT, 85);
+                            }
+                        }
+                        if self.lang == Lang::Kotlin {
+                            self.kotlin_extension_node(wcx, Some(t), None, method, scope, args.map(|a| (a, r)))
+                                .map_or(o, |ext| Outcome::found(ext, by::IMPORT, 85))
+                        } else {
+                            o
+                        }
+                    }
+                    None if self.lang == Lang::Kotlin => self
+                        .kotlin_extension_node(wcx, None, None, method, scope, args.map(|a| (a, r)))
+                        .map_or(Outcome::st(status::NO_CANDIDATE), |ext| Outcome::found(ext, by::IMPORT, 85)),
                     None => Outcome::st(status::NO_CANDIDATE),
                 }
             }
