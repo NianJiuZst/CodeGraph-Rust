@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-11-23
+
+### Context efficiency, minified-bundle skipping, transparent sync, and dynamic-dispatch hints (`ENGINE_VERSION = 15`)
+
+- **Minified / compiled JS bundle fast-skip (`cg-scan`, `cg-extract`)**:
+  - Skip Tree-sitter AST extraction for minified and compiled JS bundles (`*.min.[cm]?js`,
+    webpack runtimes, Closure/Emscripten bundles such as `draco_encoder.js` and `ammo.wasm.js`),
+    retaining them as `GENERATED` file nodes so `status`, `files`, and `node <file>` remain intact.
+  - String/template/comment-aware JS syntax scanner in `cg_scan::generated::is_minified_content`
+    prevents false positives on hand-written modules embedding large numeric lookup tables
+    (e.g. `RectAreaLightUniformsLib.js`), base64 data URIs, or minified CSS/HTML template literals.
+  - Real-world impact on `mrdoob/three.js` (1,291 files, `--release`): full indexing drops from
+    `1,273 ms` to `405 ms` (**3.1× faster**; extraction `1,124 ms → 295 ms`), peak RSS drops from
+    `631 MB` to `245 MB` (**-61%**), and index size shrinks from `23.0 MB` to `15.4 MB` (**-33%**).
+- **Session-persistent deduplication & compact/budgeted output (`cg-query`, `cg-mcp`, `cgr`)**:
+  - Upgrade `explore::History` to a serializable 32-call sliding window with interval coalescing,
+    exact interval subtraction for merged source windows, rendered-range dedup in focused
+    one-symbol `explore`, and section-end-offset tracking so truncated bodies are never cached.
+  - Add CLI `--session <ID>` / `CGR_SESSION` persistence under `.cgr/sessions/` with per-session
+    advisory locking + reload-merge (`History::save_merged`) for parallel CLI calls, plus
+    `--no-dedup` opt-out.
+  - Add `--compact` (`compact` in MCP `explore`) for low-context call-flow + blast-radius +
+    symbol outlines without dumping source bodies (never poisons dedup history), and `--max-chars`
+    (`maxChars` in MCP `explore` and `node`) with strict cap enforcement including oversized single lines.
+- **Transparent auto-sync, multi-symbol queries, and CLI cleanups (`cg-sync`, `cgr`)**:
+  - Add global `--sync` / `--no-sync` flags and `CGR_AUTO_SYNC=1` across all query commands with
+    bounded `SyncOptions::lock_timeout` graceful fallback so edits no longer require a separate sync turn.
+  - Support multiple symbols/targets in a single mmap open on `cgr callers`, `cgr callees`,
+    `cgr impact`, `cgr implementations`, and `cgr node`.
+  - Expose reference resolution counts and `resolvedRate` under `refs` in `cgr status --json`,
+    and remove duplicate `measure_changes` in `status` and redundant `Project::open` in `node`.
+- **Calibrated dynamic-dispatch / ambiguity hints via on-disk `tail_idx` (`cg-store`, `cg-query`)**:
+  - Add $O(\log R)$ `View::unresolved_refs_by_tail` and `View::unresolved_refs_from` with
+    `UnresolvedScope` (`CallLike` vs `Dependency`) and order-independent top-K base+delta parity.
+  - Surface concise unresolved / ambiguous / dynamic-receiver candidate sites on zero-result
+    `callers`, `callees`, `impact`, and focused one-symbol `explore` responses without adding
+    false-positive graph edges.
+
 ## 0.2.0 — 2026-11-22
 
 ### Vue/Svelte SFC support and deep Rust/Kotlin/Python inference (`ENGINE_VERSION = 14`)
