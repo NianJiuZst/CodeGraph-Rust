@@ -19,7 +19,7 @@ fn path_set() -> &'static RegexSet {
             r"\.pb\.[jt]s$",
             r"_pb\.[jt]s$",
             r"_grpc_pb\.[jt]s$",
-            r"[.-]min\.m?js$",
+            r"[.-]min\.[cm]?js$",
             r"_pb2(_grpc)?\.py$",
             r"_pb2\.pyi$",
             r"\.pb\.(cc|h)$",
@@ -113,27 +113,129 @@ pub fn has_generated_header(content: &str) -> bool {
     false
 }
 
-const MINIFIED_LINE_CHARS: usize = 1000;
+const MINIFIED_LINE_CHARS: usize = 400;
+const MINIFIED_MIN_BYTES: usize = 4_000;
 
-/// A minified or bundled script that is not named so (webpack runtime, or most of the text on
-/// very long lines dense with `;{}(),`).
+/// A minified or bundled script that is not named so (webpack runtime, Closure/Emscripten
+/// output, or most of the text on long lines dense with executable JS syntax `;{}()`).
+/// Ignores string/template literals and comments so hand-written modules carrying large
+/// embedded CSS/HTML/SVG/numeric lookup tables are never misclassified as minified code.
 pub fn is_minified_content(path: &str, content: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let scriptish = lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs");
-    if !scriptish || content.len() < 4 * MINIFIED_LINE_CHARS {
+    if !scriptish || content.len() < MINIFIED_MIN_BYTES {
         return false;
     }
-    if content.contains("function __webpack_require__") {
-        return true;
-    }
-    let (mut long, mut punct) = (0usize, 0usize);
-    for line in content.split('\n') {
-        if line.len() >= MINIFIED_LINE_CHARS {
-            long += line.len();
-            punct += line.bytes().filter(|b| matches!(b, b';' | b'{' | b'}' | b'(' | b')' | b',')).count();
+    let bytes = content.as_bytes();
+    let n = bytes.len();
+    let mut long_code_bytes = 0usize;
+    let mut code_punct = 0usize;
+    let mut in_block_comment = false;
+    let mut in_template = false;
+    let mut i = 0usize;
+    while i < n {
+        let line_start = i;
+        while i < n && bytes[i] != b'\n' {
+            i += 1;
+        }
+        let line_end = i;
+        if i < n {
+            i += 1; // skip '\n'
+        }
+        let line = &bytes[line_start..line_end];
+        let is_long = line.len() >= MINIFIED_LINE_CHARS;
+        let mut quote: u8 = 0; // b'\'' or b'"' (single-line strings)
+        let mut j = 0usize;
+        let mut line_code_bytes = 0usize;
+        let mut line_punct = 0usize;
+        while j < line.len() {
+            let b = line[j];
+            if in_block_comment {
+                if b == b'*' && j + 1 < line.len() && line[j + 1] == b'/' {
+                    in_block_comment = false;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+                continue;
+            }
+            if in_template {
+                if b == b'\\' {
+                    j += 2;
+                } else if b == b'`' {
+                    in_template = false;
+                    j += 1;
+                } else {
+                    j += 1;
+                }
+                continue;
+            }
+            if quote != 0 {
+                if b == b'\\' {
+                    j += 2;
+                } else if b == quote {
+                    quote = 0;
+                    j += 1;
+                } else {
+                    j += 1;
+                }
+                continue;
+            }
+            if b == b'/' && j + 1 < line.len() {
+                if line[j + 1] == b'/' {
+                    break; // rest of line is a line comment
+                }
+                if line[j + 1] == b'*' {
+                    in_block_comment = true;
+                    j += 2;
+                    continue;
+                }
+            }
+            if b == b'\'' || b == b'"' {
+                quote = b;
+                j += 1;
+                continue;
+            }
+            if b == b'`' {
+                in_template = true;
+                j += 1;
+                continue;
+            }
+            // Executable code outside literals/comments: check webpack runtime signature too.
+            if b == b'f' && line[j..].starts_with(b"function __webpack_require__") {
+                return true;
+            }
+            if is_long {
+                line_code_bytes += 1;
+                if matches!(b, b';' | b'{' | b'}' | b'(' | b')') {
+                    line_punct += 1;
+                }
+            }
+            j += 1;
+        }
+        if is_long && line_code_bytes >= MINIFIED_LINE_CHARS {
+            long_code_bytes += line_code_bytes;
+            code_punct += line_punct;
         }
     }
-    long as f64 >= content.len() as f64 * 0.5 && punct as f64 >= long as f64 * 0.03
+    long_code_bytes as f64 >= n as f64 * 0.5 && code_punct as f64 >= long_code_bytes as f64 * 0.02
+}
+
+/// Path-only check for minified JavaScript bundles (`*.min.js`, `*-min.mjs`, `*.min.cjs`).
+pub fn is_minified_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".min.js")
+        || lower.ends_with("-min.js")
+        || lower.ends_with(".min.mjs")
+        || lower.ends_with("-min.mjs")
+        || lower.ends_with(".min.cjs")
+        || lower.ends_with("-min.cjs")
+}
+
+/// True for minified or compiled JS bundles (`*.min.js`, webpack runtimes, Emscripten output)
+/// whose obfuscated single-line bodies should stay as file nodes without AST extraction.
+pub fn is_minified_script(path: &str, content: &str) -> bool {
+    is_minified_path(path) || is_minified_content(path, content)
 }
 
 pub fn detect_generated(path: &str, content: &str) -> bool {
@@ -167,5 +269,15 @@ mod tests {
         assert!(is_minified_content("x.js", &long));
         assert!(!is_minified_content("x.ts", &long));
         assert!(!is_minified_content("x.js", "const a = 1;\n"));
+        // Closure-wrapped ~500-char lines (e.g. Emscripten ammo.wasm.js)
+        let wrapped = format!("{}\n", format!("{}\n", "var a=f(b);".repeat(45)).repeat(10));
+        assert!(is_minified_content("ammo.wasm.js", &wrapped));
+        // Hand-written numeric lookup table (many commas, no `;{}()` code density) must NOT match.
+        let lut = format!("export const LUT = [{}];\nexport function init() {{ return LUT[0]; }}\n", "0.123456,".repeat(1000));
+        assert!(!is_minified_content("RectAreaLightUniformsLib.js", &lut));
+        // Normal JS module embedding a large single-line minified CSS template literal must NOT match.
+        let css = ".btn{color:red;padding:4px 8px;border:1px solid #ccc;}".repeat(120);
+        let css_mod = format!("const STYLES = `{css}`;\nexport function Button() {{ return STYLES; }}\n");
+        assert!(!is_minified_content("button.js", &css_mod));
     }
 }

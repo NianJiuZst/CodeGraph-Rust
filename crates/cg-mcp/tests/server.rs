@@ -181,3 +181,39 @@ fn project_lru_evicts_the_corresponding_watcher_resource() {
     assert!(!watched.lock().unwrap().contains(dirs[0].path()));
     server.shutdown();
 }
+
+#[test]
+fn explore_compact_max_chars_and_session_dedup() {
+    let dir = project();
+    let server = Server::new(Config { path: Some(dir.path().to_path_buf()), tools: Some(vec!["explore".into(), "node".into()]), dedup: true });
+    let out = Arc::new(Collect::default());
+    server.set_outbound(out.clone());
+
+    rpc(&server, &out, 1, "tools/list", json!({}));
+    let tools = out.by_id(1).unwrap()["result"]["tools"].clone();
+    let explore_schema = tools.as_array().unwrap().iter().find(|t| t["name"] == "codegraph-rust_explore").unwrap();
+    assert!(explore_schema["inputSchema"]["properties"]["compact"].is_object());
+    assert!(explore_schema["inputSchema"]["properties"]["maxChars"].is_object());
+    let node_schema = tools.as_array().unwrap().iter().find(|t| t["name"] == "codegraph-rust_node").unwrap();
+    assert!(node_schema["inputSchema"]["properties"]["maxChars"].is_object());
+
+    // Compact mode omits source fences and must not poison dedup.
+    call(&server, &out, 2, "codegraph-rust_explore", json!({"query": "greet", "compact": true}));
+    server.drain(Duration::from_secs(20));
+    let t2 = text_of(&out.by_id(2).unwrap());
+    assert!(t2.contains("Compact mode omits source bodies"), "{t2}");
+    assert!(!t2.contains("```ts"), "{t2}");
+
+    // First full call returns verbatim source; second deduplicates it.
+    call(&server, &out, 3, "codegraph-rust_explore", json!({"query": "greet"}));
+    server.drain(Duration::from_secs(20));
+    let t3 = text_of(&out.by_id(3).unwrap());
+    assert!(t3.contains("return format(name);"), "{t3}");
+
+    call(&server, &out, 4, "codegraph-rust_explore", json!({"query": "greet"}));
+    server.drain(Duration::from_secs(20));
+    let t4 = text_of(&out.by_id(4).unwrap());
+    assert!(t4.contains("Already sent earlier in this conversation"), "{t4}");
+    assert!(!t4.contains("return format(name);"), "{t4}");
+    server.shutdown();
+}

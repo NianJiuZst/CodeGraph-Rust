@@ -12,7 +12,7 @@
 use crate::records::*;
 use crate::seg::Seg;
 use crate::strpool::StrPool;
-use cg_core::{CgError, EdgeKind, FileId, Lang, NodeIdx, NodeKind, Provenance, Result, StrId, Visibility, NONE};
+use cg_core::{CgError, EdgeKind, FileId, Lang, NodeIdx, NodeKind, Provenance, RefKind, Result, StrId, Visibility, NONE};
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -83,6 +83,61 @@ pub struct EdgeRef {
     /// Resolution strategy (low byte) and confidence (high byte), 0 for non-resolution edges.
     pub res: u16,
     pub ref_idx: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnresolvedScope {
+    /// Call-like edges (`callers` / `callees`): Calls, Instantiates, References, FunctionRef, Navigates.
+    CallLike,
+    /// Any non-import dependency reference (`impact` / focused `explore`).
+    Dependency,
+}
+
+#[inline]
+fn matches_unresolved_scope(kind: u8, scope: UnresolvedScope) -> bool {
+    match (RefKind::from_wire(kind), scope) {
+        (Some(RefKind::Edge(EdgeKind::Imports)), _) => false,
+        (Some(RefKind::FunctionRef), _) => true,
+        (Some(RefKind::Edge(EdgeKind::Calls | EdgeKind::Instantiates | EdgeKind::References | EdgeKind::Navigates)), _) => true,
+        (Some(_), UnresolvedScope::Dependency) => true,
+        _ => false,
+    }
+}
+
+#[inline]
+fn unresolved_status_rank(s: u8) -> u8 {
+    match s {
+        status::AMBIGUOUS => 0,
+        status::LOCAL_BINDING => 1,
+        _ => 2,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnresolvedRefSite {
+    pub file: FileId,
+    pub line: u32,
+    pub status: u8,
+    pub expr: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnresolvedRefSummary {
+    pub ambiguous: usize,
+    pub dynamic: usize,
+    pub no_candidate: usize,
+    pub sites: Vec<UnresolvedRefSite>,
+}
+
+impl UnresolvedRefSummary {
+    pub fn total(&self) -> usize {
+        self.ambiguous + self.dynamic + self.no_candidate
+    }
+}
+
+#[inline]
+fn is_member_expr(expr: &str) -> bool {
+    expr.contains('.') || expr.contains("::") || expr.contains("->")
 }
 
 #[derive(Clone, Copy)]
@@ -603,6 +658,108 @@ impl View {
     pub fn sites_of(&self, f: FileId) -> &[SiteRec] {
         let (seg, ff) = self.facts_of(f);
         &seg.p.sites[ff.site_start as usize..(ff.site_start + ff.site_count) as usize]
+    }
+
+    /// Unresolved, ambiguous, or dynamic-receiver references across the view whose tail matches
+    /// `tail` within `scope`. Uses `base.p.tail_idx` ($O(\log R)$) plus active delta files with
+    /// order-independent top-K site selection across both layers.
+    pub fn unresolved_refs_by_tail(&self, tail: &str, scope: UnresolvedScope, max_sites: usize) -> UnresolvedRefSummary {
+        let mut out = UnresolvedRefSummary::default();
+        if tail.len() < 2 {
+            return out;
+        }
+        let mut push_ref = |file: FileId, r: &RefRec, expr: &str| {
+            if !matches_unresolved_scope(r.kind, scope) {
+                return;
+            }
+            match r.status {
+                status::AMBIGUOUS => out.ambiguous += 1,
+                status::LOCAL_BINDING if is_member_expr(expr) => out.dynamic += 1,
+                status::NO_CANDIDATE => out.no_candidate += 1,
+                _ => return,
+            }
+            if max_sites > 0 {
+                self.insert_top_site(&mut out.sites, max_sites, UnresolvedRefSite { file, line: r.line, status: r.status, expr: expr.to_owned() });
+            }
+        };
+        if !self.base.p.tail_idx.is_empty() {
+            if let Some(tid) = self.base.names.find(tail.as_bytes()) {
+                let idx = self.base.p.tail_idx.partition_point(|t| t.tail.0 < tid.0);
+                for t in &self.base.p.tail_idx[idx..] {
+                    if t.tail != tid {
+                        break;
+                    }
+                    let r = &self.base.p.refs[t.ref_idx as usize];
+                    let file = self.base.p.nodes_hot[r.from.idx()].file;
+                    if self.delta_file(file).is_some() {
+                        continue;
+                    }
+                    push_ref(file, r, self.base.text.get(r.name));
+                }
+            }
+        }
+        if let Some(d) = self.d() {
+            for (pos, tri) in d.seg.p.delta_files.as_chunks::<3>().0.iter().enumerate() {
+                if tri[1] == DeltaState::Removed as u32 {
+                    continue;
+                }
+                let file = FileId(tri[0]);
+                let rec = &d.seg.p.files[pos];
+                for r in &d.seg.p.refs[rec.ref_start as usize..(rec.ref_start + rec.ref_count) as usize] {
+                    if self.name_str(r.tail) == tail {
+                        push_ref(file, r, self.text_str(r.name));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Outgoing unresolved, ambiguous, or dynamic-receiver references originating from `owner`.
+    pub fn unresolved_refs_from(&self, owner: NodeIdx, scope: UnresolvedScope, max_sites: usize) -> UnresolvedRefSummary {
+        let mut out = UnresolvedRefSummary::default();
+        let file = self.hot(owner).file;
+        for r in self.refs_of_file(file) {
+            if r.from != owner || !matches_unresolved_scope(r.kind, scope) {
+                continue;
+            }
+            let expr = self.text_str(r.name);
+            match r.status {
+                status::AMBIGUOUS => out.ambiguous += 1,
+                status::LOCAL_BINDING if is_member_expr(expr) => out.dynamic += 1,
+                status::NO_CANDIDATE => out.no_candidate += 1,
+                _ => continue,
+            }
+            if max_sites > 0 {
+                self.insert_top_site(&mut out.sites, max_sites, UnresolvedRefSite { file, line: r.line, status: r.status, expr: expr.to_owned() });
+            }
+        }
+        out
+    }
+
+    /// Maintain an order-independent sorted, deduplicated top-K site list across base and delta.
+    fn insert_top_site(&self, sites: &mut Vec<UnresolvedRefSite>, max_sites: usize, cand: UnresolvedRefSite) {
+        let cmp = |a: &UnresolvedRefSite, b: &UnresolvedRefSite| {
+            unresolved_status_rank(a.status)
+                .cmp(&unresolved_status_rank(b.status))
+                .then_with(|| self.file(a.file).path().cmp(self.file(b.file).path()))
+                .then_with(|| a.line.cmp(&b.line))
+                .then_with(|| a.expr.cmp(&b.expr))
+        };
+        if let Some(pos) = sites.iter().position(|s| s.file == cand.file && s.line == cand.line && s.expr == cand.expr) {
+            if unresolved_status_rank(cand.status) < unresolved_status_rank(sites[pos].status) {
+                sites.remove(pos);
+            } else {
+                return;
+            }
+        }
+        let idx = sites.partition_point(|s| cmp(s, &cand).is_lt());
+        if idx < max_sites {
+            sites.insert(idx, cand);
+            if sites.len() > max_sites {
+                sites.pop();
+            }
+        }
     }
 
     // ----------------------------------------------------------------- source

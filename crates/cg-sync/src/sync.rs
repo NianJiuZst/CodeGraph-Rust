@@ -38,6 +38,8 @@ pub struct SyncOptions {
     /// Exact watcher paths. `None` performs a full scan; directory/config/burst events
     /// conservatively fall back to one. Periodic full scans recover dropped events.
     pub paths: Option<Vec<PathBuf>>,
+    /// Write-lock wait timeout (defaults to 30 seconds).
+    pub lock_timeout: Option<Duration>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -212,7 +214,7 @@ pub fn sync(root: &Path, opts: &SyncOptions) -> Result<SyncReport> {
     if store.read_manifest()?.is_none() {
         return Err(CgError::NoIndex(root.to_path_buf()));
     }
-    let guard = store.write_lock(Duration::from_secs(30))?;
+    let guard = store.write_lock(opts.lock_timeout.unwrap_or(Duration::from_secs(30)))?;
     store.cleanup_tmp();
     sync_locked(&store, &guard, root, opts)
 }

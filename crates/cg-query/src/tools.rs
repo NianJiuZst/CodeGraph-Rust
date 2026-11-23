@@ -63,16 +63,21 @@ fn num_arg(args: &Value, key: &str) -> Option<f64> {
 }
 
 fn truncate_output(text: String) -> String {
-    if text.len() <= MAX_OUTPUT_LENGTH {
+    truncate_output_to(text, MAX_OUTPUT_LENGTH)
+}
+
+fn truncate_output_to(text: String, cap: usize) -> String {
+    if text.len() <= cap {
         return text;
     }
-    let mut cut = MAX_OUTPUT_LENGTH;
-    while !text.is_char_boundary(cut) {
+    const TAIL: &str = "\n\n... (output truncated)";
+    let mut cut = cap.saturating_sub(TAIL.len());
+    while cut > 0 && !text.is_char_boundary(cut) {
         cut -= 1;
     }
     let head = &text[..cut];
-    let nl = head.rfind('\n').filter(|n| *n as f64 > MAX_OUTPUT_LENGTH as f64 * 0.8).unwrap_or(cut);
-    format!("{}\n\n... (output truncated)", &head[..nl])
+    let nl = head.rfind('\n').filter(|n| *n as f64 > cut as f64 * 0.8).unwrap_or(cut);
+    format!("{}{TAIL}", &head[..nl])
 }
 
 /// Dispatch a tool by its short name (`explore`, `node`, ...).
@@ -94,7 +99,12 @@ fn handle_explore(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
     let Some(query) = str_arg(args, "query") else {
         return ToolOutput::err("Error: query must be a non-empty string");
     };
-    let opts = ExploreOptions { max_files: num_arg(args, "maxFiles").map(|n| clamp(n, 1.0, 20.0)), max_output: None, history: env.history.clone() };
+    let opts = ExploreOptions {
+        max_files: num_arg(args, "maxFiles").map(|n| clamp(n, 1.0, 20.0)),
+        max_output: num_arg(args, "maxChars").map(|n| clamp(n, 1_000.0, 50_000.0)),
+        compact: args.get("compact").and_then(|v| v.as_bool()).unwrap_or(false),
+        history: env.history.clone(),
+    };
     let r = env.graph.explore(query, &opts);
     ToolOutput::ok(r.text)
 }
@@ -211,6 +221,61 @@ fn stale_banner_for_files(g: &Graph, files: impl IntoIterator<Item = FileId>) ->
     format!("{}\n\n", strings::stale_banner(&stale))
 }
 
+pub(crate) fn format_unresolved_hint(g: &Graph, subject: &str, what: &str, summary: &cg_store::UnresolvedRefSummary) -> String {
+    let total = summary.total();
+    if total == 0 {
+        return String::new();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if summary.ambiguous > 0 {
+        parts.push(format!("{} ambiguous", summary.ambiguous));
+    }
+    if summary.dynamic > 0 {
+        parts.push(format!("{} dynamic-receiver", summary.dynamic));
+    }
+    if summary.no_candidate > 0 {
+        parts.push(format!("{} unresolved", summary.no_candidate));
+    }
+    let counts = parts.join(", ");
+    let mut out = format!(
+        "> **Note (unresolved / ambiguous references):** static graph found 0 resolved {what}, but the index records {counts} reference(s) for `{subject}` (possible dynamic dispatch or overload):"
+    );
+    for s in &summary.sites {
+        let tag = match s.status {
+            cg_store::status::AMBIGUOUS => "ambiguous",
+            cg_store::status::LOCAL_BINDING => "dynamic",
+            _ => "unresolved",
+        };
+        out.push_str(&format!("\n> - `{}:{}` (`{}`) [{tag}]", g.path(s.file), s.line, s.expr));
+    }
+    if total > summary.sites.len() {
+        out.push_str(&format!("\n> - … (+{} more)", total - summary.sites.len()));
+    }
+    out
+}
+
+fn unresolved_outgoing_for_defs(g: &Graph, defs: &[NodeIdx], max_sites: usize) -> cg_store::UnresolvedRefSummary {
+    let mut merged = cg_store::UnresolvedRefSummary::default();
+    for d in defs {
+        let s = g.view.unresolved_refs_from(*d, cg_store::UnresolvedScope::CallLike, max_sites);
+        merged.ambiguous += s.ambiguous;
+        merged.dynamic += s.dynamic;
+        merged.no_candidate += s.no_candidate;
+        merged.sites.extend(s.sites);
+    }
+    let rank = |s: u8| match s {
+        cg_store::status::AMBIGUOUS => 0u8,
+        cg_store::status::LOCAL_BINDING => 1u8,
+        _ => 2u8,
+    };
+    merged.sites.sort_by(|a, b| {
+        rank(a.status).cmp(&rank(b.status)).then_with(|| g.path(a.file).cmp(g.path(b.file))).then_with(|| a.line.cmp(&b.line)).then_with(|| a.expr.cmp(&b.expr))
+    });
+    merged.sites.dedup_by(|b, a| a.file == b.file && a.line == b.line && a.expr == b.expr);
+    merged.sites.truncate(max_sites);
+    merged
+}
+
 fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput {
     let g = env.graph;
     let Some(symbol) = str_arg(args, "symbol") else {
@@ -278,7 +343,15 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
         let (rows, files) = collect(&groups[0]);
         let stale = stale_banner_for_files(g, files);
         if rows.is_empty() {
-            return ToolOutput::ok(format!("{stale}No {what} found for \"{symbol}\"{filter_note}"));
+            let simple = g.name(groups[0][0]);
+            let summary = if callers {
+                g.view.unresolved_refs_by_tail(simple, cg_store::UnresolvedScope::CallLike, 5)
+            } else {
+                unresolved_outgoing_for_defs(g, &groups[0], 5)
+            };
+            let hint = format_unresolved_hint(g, simple, what, &summary);
+            let hint_block = if hint.is_empty() { String::new() } else { format!("\n\n{hint}") };
+            return ToolOutput::ok(format!("{stale}No {what} found for \"{symbol}\"{hint_block}{filter_note}"));
         }
         let cut =
             if rows.len() > limit { format!("\n\n> Showing {limit} of {} {what}; pass `limit` (up to 100) to widen.", rows.len()) } else { String::new() };
@@ -287,6 +360,7 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
         return ToolOutput::ok(truncate_output(stale + &lines.join("\n") + &cut + &filter_note));
     }
     let mut touched: Vec<FileId> = Vec::new();
+    let mut any_rows = false;
     let mut lines = vec![format!("**{title} {symbol} — {} distinct definitions (narrow with `file`)**", groups.len())];
     for grp in &groups {
         let head = grp[0];
@@ -296,16 +370,36 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
         touched.extend(files);
         if rows.is_empty() {
             lines.push(format!("- (no {what})"));
+            if !callers {
+                let summary = unresolved_outgoing_for_defs(g, grp, 3);
+                let hint = format_unresolved_hint(g, g.name(head), what, &summary);
+                if !hint.is_empty() {
+                    lines.push(hint);
+                }
+            }
             continue;
         }
+        any_rows = true;
         let total = rows.len();
         lines.extend(rows.into_iter().take(limit));
         if total > limit {
             lines.push(format!("- … +{} more (pass `limit` to widen)", total - limit));
         }
     }
+    let hint_block = if !any_rows && callers {
+        let simple = g.name(groups[0][0]);
+        let summary = g.view.unresolved_refs_by_tail(simple, cg_store::UnresolvedScope::CallLike, 5);
+        let hint = format_unresolved_hint(g, simple, what, &summary);
+        if hint.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{hint}")
+        }
+    } else {
+        String::new()
+    };
     let stale = stale_banner_for_files(g, touched);
-    ToolOutput::ok(truncate_output(stale + &lines.join("\n") + &filter_note))
+    ToolOutput::ok(truncate_output(stale + &lines.join("\n") + &hint_block + &filter_note))
 }
 
 fn format_impact(g: &Graph, label: &str, root: NodeIdx, imp: &crate::traverse::Impact) -> String {
@@ -355,20 +449,46 @@ fn handle_impact(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
         let root = groups[0][0];
         let imp = g.impact(root, depth, 5_000);
         let stale = stale_banner_for_files(g, std::iter::once(g.view.hot(root).file).chain(imp.nodes.iter().map(|(n, _)| g.view.hot(*n).file)));
-        return ToolOutput::ok(truncate_output(stale + &format_impact(g, symbol, root, &imp) + &filter_note));
+        let hint_block = if imp.nodes.is_empty() {
+            let simple = g.name(root);
+            let summary = g.view.unresolved_refs_by_tail(simple, cg_store::UnresolvedScope::Dependency, 5);
+            let hint = format_unresolved_hint(g, simple, "dependents", &summary);
+            if hint.is_empty() {
+                String::new()
+            } else {
+                format!("\n{hint}")
+            }
+        } else {
+            String::new()
+        };
+        return ToolOutput::ok(truncate_output(stale + &format_impact(g, symbol, root, &imp) + &hint_block + &filter_note));
     }
     let mut touched: Vec<FileId> = Vec::new();
+    let mut any_dependents = false;
     let mut lines = vec![format!("**Impact of {symbol} — {} distinct definitions (each with its own blast radius; narrow with `file`)**", groups.len())];
     for grp in groups.iter().take(12) {
         let root = grp[0];
         let imp = g.impact(root, depth, 5_000);
+        any_dependents |= !imp.nodes.is_empty();
         touched.push(g.view.hot(root).file);
         touched.extend(imp.nodes.iter().map(|(n, _)| g.view.hot(*n).file));
         lines.push(String::new());
         lines.push(format_impact(g, &format!("{} ({}:{})", g.qname(root), g.node_path(root), g.line(root)), root, &imp));
     }
+    let hint_block = if !any_dependents {
+        let simple = g.name(groups[0][0]);
+        let summary = g.view.unresolved_refs_by_tail(simple, cg_store::UnresolvedScope::Dependency, 5);
+        let hint = format_unresolved_hint(g, simple, "dependents", &summary);
+        if hint.is_empty() {
+            String::new()
+        } else {
+            format!("\n{hint}")
+        }
+    } else {
+        String::new()
+    };
     let stale = stale_banner_for_files(g, touched);
-    ToolOutput::ok(truncate_output(stale + &lines.join("\n") + &filter_note))
+    ToolOutput::ok(truncate_output(stale + &lines.join("\n") + &hint_block + &filter_note))
 }
 
 /// Safety checks for a path argument (design doc 8.4, 10.4): inside the project only, no
@@ -414,6 +534,7 @@ fn handle_node(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
             offset: num_arg(args, "offset").filter(|n| *n > 0.0).map(|n| n as usize),
             limit: num_arg(args, "limit").filter(|n| *n > 0.0).map(|n| n as usize),
             symbols_only: args.get("symbolsOnly").and_then(|v| v.as_bool()).unwrap_or(false),
+            max_chars: num_arg(args, "maxChars").map(|n| clamp(n, 1_000.0, 100_000.0)),
         };
         return file_view(g, file, opts);
     }
@@ -548,6 +669,7 @@ struct FileViewOpts {
     offset: Option<usize>,
     limit: Option<usize>,
     symbols_only: bool,
+    max_chars: Option<usize>,
 }
 
 fn file_view(g: &Graph, file_arg: &str, mut opts: FileViewOpts) -> ToolOutput {
@@ -627,7 +749,7 @@ fn file_view(g: &Graph, file_arg: &str, mut opts: FileViewOpts) -> ToolOutput {
         }
         out.push(String::new());
         out.push("> Drop `symbolsOnly` (or pass `offset`/`limit`) to read the source, like Read.".into());
-        return ToolOutput::ok(truncate_output(out.join("\n")));
+        return ToolOutput::ok(truncate_output_to(out.join("\n"), opts.max_chars.unwrap_or(MAX_OUTPUT_LENGTH)));
     }
     let Some(abs) = g.abs_path(&path) else {
         return ToolOutput::err("Error: path escapes the project root");
@@ -652,13 +774,27 @@ fn file_view(g: &Graph, file_arg: &str, mut opts: FileViewOpts) -> ToolOutput {
     }
     let max_lines = opts.limit.unwrap_or(2000).max(1);
     let header = format!("**{path}**{test_label} — {total} lines, {} symbol{} · {dep_summary}", nodes.len(), if nodes.len() == 1 { "" } else { "s" });
-    const CHAR_BUDGET: usize = 38_000;
+    let char_budget = opts.max_chars.unwrap_or(38_000);
+    let footer_reserve = 140usize;
+    let body_budget = char_budget.saturating_sub(footer_reserve).max(200);
     let mut numbered: Vec<String> = Vec::new();
-    let mut used = header.len() + 8;
+    let mut used = header.len() + 2;
+    let mut line_clipped = false;
     let mut i = offset - 1;
     while i < total && numbered.len() < max_lines {
         let ln = format!("{}\t{}", i + 1, file_lines[i].strip_suffix('\r').unwrap_or(file_lines[i]));
-        if used + ln.len() + 1 > CHAR_BUDGET && !numbered.is_empty() {
+        if used + ln.len() + 1 > body_budget {
+            if numbered.is_empty() {
+                // Clip an oversized single line (e.g. minified bundle) so `maxChars` is respected.
+                const CLIP_NOTE: &str = " … (line truncated to fit budget)";
+                let avail = body_budget.saturating_sub(used + CLIP_NOTE.len()).max(64);
+                let mut cut = avail.min(ln.len());
+                while cut > 0 && !ln.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                numbered.push(format!("{}{CLIP_NOTE}", &ln[..cut]));
+                line_clipped = true;
+            }
             break;
         }
         used += ln.len() + 1;
@@ -666,13 +802,14 @@ fn file_view(g: &Graph, file_arg: &str, mut opts: FileViewOpts) -> ToolOutput {
         i += 1;
     }
     let shown_end = offset - 1 + numbered.len();
-    let complete = offset == 1 && shown_end >= total;
+    let complete = offset == 1 && shown_end >= total && !line_clipped;
     let mut out = vec![header, String::new()];
     out.extend(numbered);
     if !complete {
         out.push(String::new());
         out.push(format!(
-            "(lines {offset}–{shown_end} of {total} — pass `offset`/`limit` for another range, or `{} <symbol>` for one symbol in full)",
+            "(lines {offset}–{shown_end} of {total}{} — pass `offset`/`limit` for another range, or `{} <symbol>` for one symbol in full)",
+            if line_clipped { ", partial line" } else { "" },
             strings::tool("node")
         ));
     }

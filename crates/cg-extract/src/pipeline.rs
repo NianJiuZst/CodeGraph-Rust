@@ -233,19 +233,21 @@ pub fn extract_bytes(rel: &str, bytes: &[u8], mtime_ns: i64, lang_hint: Lang, cf
     let detected = scanlang::detect(rel, Some(&src), &cfg.overrides);
     let lang = if detected.is_supported() { detected } else { lang_hint };
     let mut flags = 0u8;
-    if generated::detect_generated(rel, &src) {
+    let minified = generated::is_minified_script(rel, &src);
+    if minified || generated::is_generated_path(rel) || generated::has_generated_header(&src) {
         flags |= fileflags::GENERATED;
     }
     if testpath::is_test_path(rel) {
         flags |= fileflags::TEST;
     }
-    if detected == Lang::ObjC {
-        // An Objective-C header has no walker; the C grammar's error recovery would mint
-        // phantom symbols from it. Keep the file (so `status` can count it) without symbols.
+    if detected == Lang::ObjC || minified {
+        // Objective-C headers have no walker, and minified/compiled JS bundles (`*.min.js`,
+        // Emscripten/webpack output) choke Tree-sitter with obfuscated single-line bodies.
+        // Keep the file node (so `status`/`files`/`node <file>` still see it) without symbols.
         let line_count = src.bytes().filter(|b| *b == b'\n').count() as u32 + 1;
         return FileBatch {
             rel: rel.to_owned(),
-            lang: Lang::ObjC,
+            lang: if detected == Lang::ObjC { Lang::ObjC } else { lang },
             size: bytes.len() as u32,
             mtime_ns,
             hash: h,

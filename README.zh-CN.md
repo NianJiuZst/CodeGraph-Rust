@@ -373,23 +373,23 @@ C/C++、C#、PHP、Ruby、Swift 使用上游的提取 walker，并配有本项�
 
 ## 命令行参考
 
-完整选项见 `cgr --help` 或 `cgr <command> --help`。使用 `--path` / `-p` 指定项目，例如
-`cgr --path /path/to/project explore "UserService save"`。查询命令可以在当前目录或其祖先目录查找已有索引。
+完整选项见 `cgr --help` 或 `cgr <command> --help`。全局参数 `--path` / `-p`、`--sync` / `--no-sync`（或 `CGR_AUTO_SYNC=1`）
+以及 `--session <ID>`（或 `CGR_SESSION`）适用于所有查询命令；查询命令会自动在当前目录或祖先目录查找 `.cgr/` 索引。
 
 | 命令 | 用途 |
 |---|---|
 | `cgr init [path]` | 创建 `.cgr/` 并建立全量索引 |
 | `cgr index [path] --timings` | 全量重建并输出各阶段耗时 |
 | `cgr sync [path]` | 将新增、修改、删除的文件同步到索引 |
-| `cgr status --json --verify` | 查看数量、变更和快照校验结果 |
+| `cgr status --json --verify` | 查看数量、引用解析统计（`refs`）、变更与校验结果 |
 | `cgr status --strict` | 索引存在待同步变更时返回非零状态 |
-| `cgr explore <query…>` | 获取相关源码、调用路径与修改影响 |
+| `cgr explore <query…> [--compact] [--max-chars N]` | 获取相关源码（或紧凑大纲）、调用路径与修改影响 |
 | `cgr query <text> --kind function --json` | 检索符号，可按类型过滤 |
-| `cgr node <symbol-or-file> --code` | 查看符号或文件及其源码 |
+| `cgr node <targets…> --code [--max-chars N]` | 单次打开索引批量查看一个或多个符号/文件及其源码 |
 | `cgr files [--tests\|--no-tests] [--format package]` | 按目录树、语言或包清单查看已索引文件 |
-| `cgr callers <symbol>` / `cgr callees <symbol>` | 查询调用方或被调用方 |
-| `cgr impact <symbol> --depth 2` | 查看修改影响的图谱邻域 |
-| `cgr implementations <symbol> --depth 10` | 查找实现或子类型 |
+| `cgr callers <symbols…>` / `cgr callees <symbols…>` | 批量查询调用方或被调用方（零结果时附动态/歧义提示） |
+| `cgr impact <symbols…> --depth 2` | 查看修改一个或多个符号的影响邻域 |
+| `cgr implementations <symbols…> --depth 10` | 查找实现或子类型 |
 | `cgr affected <files…> [--cross-tier] --json` | 查找与变更文件关联的测试文件 |
 | `cgr cycles --json` | 查看导入环；存在环时退出码为 1 |
 | `cgr export --sqlite graph.sqlite` | 导出可供 SQL 分析的 SQLite 图谱 |
@@ -527,6 +527,8 @@ cp skills/codegraph-rust/SKILL.md ~/.gemini/config/skills/codegraph-rust/SKILL.m
 | `CGR_MEMORY_MB` | 用于线程、批次、kernel 临时映射和解析缓存的调优预算，不是 RSS 硬上限 |
 | `CGR_MCP_TOOLS` | 逗号分隔的 MCP 工具列表，兼容回退到 `CODEGRAPH_MCP_TOOLS` |
 | `CGR_EXPLORE_DEDUP=1` | 在同一个持久 MCP 对话中跳过已返回源码 |
+| `CGR_SESSION` | CLI 跨调用 `explore` 去重会话 ID（保存在 `.cgr/sessions/`） |
+| `CGR_AUTO_SYNC=1` | CLI 查询前自动增量同步过期索引（可用 `--no-sync` 覆盖） |
 | `CGR_NO_PROMPT_HOOK=1` | 运行时禁用可选的 Claude Code 提示钩子 |
 | `CGR_HTTP_TOKEN` | 要求 HTTP 请求使用 Bearer Token |
 | `CGR_LOG` | 服务日志过滤条件，默认 `warn`，写入 stderr |

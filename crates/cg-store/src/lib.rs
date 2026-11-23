@@ -24,4 +24,4 @@ pub use records::*;
 pub use seg::{Seg, SegMeta, SegParts};
 pub use store::{FsyncMode, Manifest, Snapshot, Store, WatchGuard, WriteGuard};
 pub use strpool::StrPool;
-pub use view::{DeltaIdx, DeltaState, EdgeRef, FileRef, NodeRef, OutEdges, Posting, View};
+pub use view::{DeltaIdx, DeltaState, EdgeRef, FileRef, NodeRef, OutEdges, Posting, UnresolvedRefSite, UnresolvedRefSummary, UnresolvedScope, View};

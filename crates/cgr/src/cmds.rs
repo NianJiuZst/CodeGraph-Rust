@@ -3,11 +3,36 @@
 
 use anyhow::{anyhow, Context, Result};
 use cg_core::{brand, FileId, NodeIdx};
+use cg_query::explore::History;
 use cg_query::tools::{self, ToolEnv};
 use cg_query::Project;
 use cg_store::dump;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncMode {
+    Off,
+    Auto,
+    Explicit,
+}
+
+pub struct QueryCtx {
+    pub base: Option<PathBuf>,
+    pub sync: SyncMode,
+    pub session: Option<String>,
+}
+
+pub struct NodeArgs {
+    pub code: bool,
+    pub file: Option<String>,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+    pub symbols_only: bool,
+    pub max_chars: Option<usize>,
+}
 
 fn start_dir(p: Option<PathBuf>) -> Result<PathBuf> {
     let p = p.unwrap_or_else(|| PathBuf::from("."));
@@ -19,12 +44,73 @@ fn open(p: Option<PathBuf>) -> Result<Project> {
     Project::locate(&start).map_err(|e| anyhow!("{e} (looked above {}; run `{} init` first)", start.display(), brand::BIN_NAME))
 }
 
-fn call(p: Option<PathBuf>, tool: &str, args: serde_json::Value) -> Result<i32> {
-    let proj = open(p)?;
-    let env = ToolEnv { graph: &proj.graph, history: None, status: proj.status_info() };
+fn open_for_query(p: Option<PathBuf>, sync: SyncMode) -> Result<Project> {
+    let start = start_dir(p)?;
+    let store = cg_store::Store::locate(&start)
+        .ok_or_else(|| anyhow!("no {} index found above {} (run `{} init` first)", brand::DATA_DIR, start.display(), brand::BIN_NAME))?;
+    if sync != SyncMode::Off {
+        let timeout = match sync {
+            SyncMode::Explicit => Duration::from_secs(5),
+            SyncMode::Auto => Duration::from_millis(150),
+            SyncMode::Off => unreachable!(),
+        };
+        let opts = cg_sync::SyncOptions { lock_timeout: Some(timeout), ..Default::default() };
+        if let Err(e) = cg_sync::sync(&store.root, &opts) {
+            if sync == SyncMode::Explicit {
+                eprintln!("warning: sync skipped ({e}); answering from existing snapshot");
+            }
+        }
+    }
+    Project::open(store).map_err(|e| anyhow!("{e}"))
+}
+
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn session_path(root: &Path, session_id: &str) -> PathBuf {
+    root.join(brand::DATA_DIR).join("sessions").join(format!("{:016x}.json", fnv1a_64(session_id.as_bytes())))
+}
+
+fn prune_sessions(dir: &Path) {
+    const MAX_SESSIONS: usize = 32;
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .filter_map(|p| std::fs::metadata(&p).ok().and_then(|m| m.modified().ok()).map(|t| (t, p)))
+        .collect();
+    if files.len() <= MAX_SESSIONS {
+        return;
+    }
+    files.sort_by_key(|(t, _)| *t);
+    for (_, p) in files.iter().take(files.len() - MAX_SESSIONS) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+fn call_proj(proj: &Project, tool: &str, args: serde_json::Value, history: Option<Arc<Mutex<History>>>) -> i32 {
+    let env = ToolEnv { graph: &proj.graph, history, status: proj.status_info() };
     let out = tools::call(&env, tool, &args);
     println!("{}", out.text);
-    Ok(if out.is_error { 1 } else { 0 })
+    if out.is_error {
+        1
+    } else {
+        0
+    }
+}
+
+fn call(ctx: &QueryCtx, tool: &str, args: serde_json::Value) -> Result<i32> {
+    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
+    Ok(call_proj(&proj, tool, args, None))
 }
 
 pub fn init(path: Option<PathBuf>, local_only: bool) -> Result<i32> {
@@ -93,7 +179,13 @@ pub fn status(path: Option<PathBuf>, json: bool, strict: bool, verify: bool) -> 
     }
     let m = &proj.snap.manifest;
     let info = proj.status_info();
+    let ref_stats = dump::ref_stats(&proj.snap.view);
+    let changes = cg_sync::measure_changes(proj.root(), &proj.snap.view).ok();
     if json {
+        let rc = |k: &str| ref_stats.iter().find(|(name, _)| *name == k).map_or(0, |(_, n)| *n);
+        let total: usize = ref_stats.iter().map(|(_, n)| *n).sum();
+        let resolved = rc("Resolved");
+        let resolved_rate = if total == 0 { 0.0 } else { ((resolved as f64 / total as f64) * 10_000.0).round() / 10_000.0 };
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
@@ -103,21 +195,29 @@ pub fn status(path: Option<PathBuf>, json: bool, strict: bool, verify: bool) -> 
                 "generation": m.generation, "engineVersion": m.engine_version, "engineOutdated": info.engine_outdated,
                 "bytes": info.bytes, "updatedAt": info.built_at, "deltaLayer": m.delta.is_some(),
                 "verified": verify,
-                "changes": cg_sync::measure_changes(proj.root(), &proj.snap.view).ok().map(|c| json!({"added": c.added, "modified": c.modified, "removed": c.removed})),
+                "refs": {
+                    "total": total,
+                    "resolved": resolved,
+                    "noCandidate": rc("NoCandidate"),
+                    "ambiguous": rc("Ambiguous"),
+                    "external": rc("External"),
+                    "localBinding": rc("LocalBinding"),
+                    "builtin": rc("Builtin"),
+                    "pending": rc("Pending"),
+                    "resolvedRate": resolved_rate,
+                },
+                "changes": changes.as_ref().map(|c| json!({"added": c.added, "modified": c.modified, "removed": c.removed})),
             }))?
         );
     } else {
         println!("files {}  nodes {}  edges {}  generation {}", m.n_files, m.n_nodes, m.n_edges, m.generation);
-        for (name, n) in dump::ref_stats(&proj.snap.view) {
+        for (name, n) in &ref_stats {
             println!("  refs {name:<12} {n}");
         }
         println!("  size {:.2} MB  updated {}", info.bytes as f64 / 1048576.0, info.built_at);
         if info.engine_outdated {
             println!("  note: index built by an older engine; run `{} index` to rebuild", brand::BIN_NAME);
         }
-    }
-    let changes = cg_sync::measure_changes(proj.root(), &proj.snap.view).ok();
-    if !json {
         match &changes {
             Some(c) => println!("  changes since last sync: {}", c.describe()),
             None => println!("  changes since last sync: unknown"),
@@ -129,15 +229,15 @@ pub fn status(path: Option<PathBuf>, json: bool, strict: bool, verify: bool) -> 
     Ok(0)
 }
 
-pub fn query(base: Option<PathBuf>, search: &str, kind: Option<String>, limit: usize, json_out: bool) -> Result<i32> {
+pub fn query(ctx: &QueryCtx, search: &str, kind: Option<String>, limit: usize, json_out: bool) -> Result<i32> {
     if !json_out {
         let mut args = json!({"query": search, "limit": limit});
         if let Some(k) = kind {
             args["kind"] = json!(k);
         }
-        return call(base, "search", args);
+        return call(ctx, "search", args);
     }
-    let proj = open(base)?;
+    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
     let g = &proj.graph;
     let kinds: Vec<cg_core::NodeKind> =
         kind.as_deref().and_then(|k| if k == "type" { Some(cg_core::NodeKind::TypeAlias) } else { cg_core::NodeKind::parse(k) }).into_iter().collect();
@@ -156,49 +256,73 @@ pub fn query(base: Option<PathBuf>, search: &str, kind: Option<String>, limit: u
     Ok(0)
 }
 
-pub fn explore(base: Option<PathBuf>, query: &str, max_files: Option<usize>) -> Result<i32> {
-    let mut args = json!({"query": query});
+pub fn explore(ctx: &QueryCtx, query: &str, max_files: Option<usize>, max_chars: Option<usize>, compact: bool, no_dedup: bool) -> Result<i32> {
+    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
+    let mut args = json!({"query": query, "compact": compact});
     if let Some(m) = max_files {
         args["maxFiles"] = json!(m);
     }
-    call(base, "explore", args)
+    if let Some(c) = max_chars {
+        args["maxChars"] = json!(c);
+    }
+    let sess = if !no_dedup && !compact { ctx.session.as_deref().map(str::trim).filter(|s| !s.is_empty()) } else { None };
+    let (history, sess_file) = match sess {
+        Some(sid) => {
+            let path = session_path(proj.root(), sid);
+            (Some(Arc::new(Mutex::new(History::load(&path)))), Some(path))
+        }
+        None => (None, None),
+    };
+    let code = call_proj(&proj, "explore", args, history.clone());
+    if let (Some(h), Some(path)) = (history, sess_file) {
+        let guard = h.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.save_merged(&path).is_ok() {
+            if let Some(dir) = path.parent() {
+                prune_sessions(dir);
+            }
+        }
+    }
+    Ok(code)
 }
 
-pub fn node(
-    base: Option<PathBuf>,
-    target: &str,
-    code: bool,
-    file: Option<String>,
-    offset: Option<usize>,
-    limit: Option<usize>,
-    symbols_only: bool,
-) -> Result<i32> {
-    let proj = open(base.clone())?;
-    // A name that resolves to a symbol is a symbol; otherwise treat the argument as a file.
-    let is_symbol = !proj.graph.resolve_symbol(target).is_empty();
-    let mut args = json!({"includeCode": code});
-    if is_symbol {
-        args["symbol"] = json!(target);
-        if let Some(f) = file {
-            args["file"] = json!(f);
+pub fn node(ctx: &QueryCtx, targets: &[String], opts: NodeArgs) -> Result<i32> {
+    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
+    let env = ToolEnv { graph: &proj.graph, history: None, status: proj.status_info() };
+    let mut parts: Vec<String> = Vec::with_capacity(targets.len());
+    let mut any_err = false;
+    for target in targets {
+        // A name that resolves to a symbol is a symbol; otherwise treat the argument as a file.
+        let is_symbol = !proj.graph.resolve_symbol(target).is_empty();
+        let mut args = json!({"includeCode": opts.code});
+        if is_symbol {
+            args["symbol"] = json!(target);
+            if let Some(f) = &opts.file {
+                args["file"] = json!(f);
+            }
+        } else {
+            args["file"] = json!(target);
+            if let Some(o) = opts.offset {
+                args["offset"] = json!(o);
+            }
+            if let Some(l) = opts.limit {
+                args["limit"] = json!(l);
+            }
+            if let Some(mc) = opts.max_chars {
+                args["maxChars"] = json!(mc);
+            }
+            args["symbolsOnly"] = json!(opts.symbols_only);
         }
-    } else {
-        args["file"] = json!(target);
-        if let Some(o) = offset {
-            args["offset"] = json!(o);
-        }
-        if let Some(l) = limit {
-            args["limit"] = json!(l);
-        }
-        args["symbolsOnly"] = json!(symbols_only);
+        let out = tools::call(&env, "node", &args);
+        any_err |= out.is_error;
+        parts.push(out.text);
     }
-    drop(proj);
-    call(base, "node", args)
+    println!("{}", parts.join("\n\n---\n\n"));
+    Ok(if any_err { 1 } else { 0 })
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn files(
-    base: Option<PathBuf>,
+    ctx: &QueryCtx,
     dir: Option<String>,
     pattern: Option<String>,
     format: &str,
@@ -217,38 +341,64 @@ pub fn files(
     if let Some(m) = max_depth {
         args["maxDepth"] = json!(m);
     }
-    call(base, "files", args)
+    call(ctx, "files", args)
 }
 
-pub fn callers(base: Option<PathBuf>, symbol: &str, file: Option<String>, limit: usize, callers: bool) -> Result<i32> {
-    let mut args = json!({"symbol": symbol, "limit": limit});
-    if let Some(f) = file {
-        args["file"] = json!(f);
+pub fn callers(ctx: &QueryCtx, symbols: &[String], file: Option<String>, limit: usize, callers: bool) -> Result<i32> {
+    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
+    let env = ToolEnv { graph: &proj.graph, history: None, status: proj.status_info() };
+    let tool = if callers { "callers" } else { "callees" };
+    let mut parts: Vec<String> = Vec::with_capacity(symbols.len());
+    let mut any_err = false;
+    for symbol in symbols {
+        let mut args = json!({"symbol": symbol, "limit": limit});
+        if let Some(f) = &file {
+            args["file"] = json!(f);
+        }
+        let out = tools::call(&env, tool, &args);
+        any_err |= out.is_error;
+        parts.push(out.text);
     }
-    call(base, if callers { "callers" } else { "callees" }, args)
+    println!("{}", parts.join("\n\n---\n\n"));
+    Ok(if any_err { 1 } else { 0 })
 }
 
-pub fn impact(base: Option<PathBuf>, symbol: &str, file: Option<String>, depth: u32) -> Result<i32> {
-    let mut args = json!({"symbol": symbol, "depth": depth});
-    if let Some(f) = file {
-        args["file"] = json!(f);
+pub fn impact(ctx: &QueryCtx, symbols: &[String], file: Option<String>, depth: u32) -> Result<i32> {
+    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
+    let env = ToolEnv { graph: &proj.graph, history: None, status: proj.status_info() };
+    let mut parts: Vec<String> = Vec::with_capacity(symbols.len());
+    let mut any_err = false;
+    for symbol in symbols {
+        let mut args = json!({"symbol": symbol, "depth": depth});
+        if let Some(f) = &file {
+            args["file"] = json!(f);
+        }
+        let out = tools::call(&env, "impact", &args);
+        any_err |= out.is_error;
+        parts.push(out.text);
     }
-    call(base, "impact", args)
+    println!("{}", parts.join("\n\n---\n\n"));
+    Ok(if any_err { 1 } else { 0 })
 }
 
-pub fn implementations(base: Option<PathBuf>, symbol: &str, depth: u32) -> Result<i32> {
-    let proj = open(base)?;
+pub fn implementations(ctx: &QueryCtx, symbols: &[String], depth: u32) -> Result<i32> {
+    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
     let g = &proj.graph;
-    let nodes = g.resolve_symbol(symbol);
-    if nodes.is_empty() {
-        println!("Symbol \"{symbol}\" not found in the codebase");
-        return Ok(0);
-    }
-    for n in nodes {
-        let impls = g.implementations(n, depth);
-        println!("**Implementations of {} ({}:{}) — {} found**", g.qname(n), g.node_path(n), g.line(n), impls.len());
-        for i in &impls {
-            println!("- {} ({}) - {}:{}", g.name(*i), g.kind(*i), g.node_path(*i), g.line(*i));
+    for (idx, symbol) in symbols.iter().enumerate() {
+        if idx > 0 {
+            println!("\n---\n");
+        }
+        let nodes = g.resolve_symbol(symbol);
+        if nodes.is_empty() {
+            println!("Symbol \"{symbol}\" not found in the codebase");
+            continue;
+        }
+        for n in nodes {
+            let impls = g.implementations(n, depth);
+            println!("**Implementations of {} ({}:{}) — {} found**", g.qname(n), g.node_path(n), g.line(n), impls.len());
+            for i in &impls {
+                println!("- {} ({}) - {}:{}", g.name(*i), g.kind(*i), g.node_path(*i), g.line(*i));
+            }
         }
     }
     Ok(0)
@@ -256,7 +406,7 @@ pub fn implementations(base: Option<PathBuf>, symbol: &str, depth: u32) -> Resul
 
 #[allow(clippy::too_many_arguments)]
 pub fn affected(
-    base: Option<PathBuf>,
+    ctx: &QueryCtx,
     mut files: Vec<String>,
     stdin: bool,
     depth: u32,
@@ -274,7 +424,7 @@ pub fn affected(
             }
         }
     }
-    let proj = open(base)?;
+    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
     let g = &proj.graph;
     let mut changed: Vec<FileId> = Vec::new();
     for f in &files {
@@ -312,8 +462,8 @@ pub fn affected(
     Ok(0)
 }
 
-pub fn cycles(path: Option<PathBuf>, json_out: bool) -> Result<i32> {
-    let proj = open(path)?;
+pub fn cycles(path: Option<PathBuf>, sync: SyncMode, json_out: bool) -> Result<i32> {
+    let proj = open_for_query(path, sync)?;
     let g = &proj.graph;
     let fg = g.file_graph();
     let cycles = g.import_cycles(&fg);

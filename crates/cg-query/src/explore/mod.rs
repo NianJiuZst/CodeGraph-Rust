@@ -13,7 +13,9 @@ use crate::strings;
 use cg_core::{fileflags, EdgeKind, FileId, NodeIdx, NodeKind};
 use flow::NamedTok;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::VecDeque;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, VecDeque};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use window::{Want, WantCtx};
 
@@ -39,46 +41,121 @@ pub fn budget_for(files: usize) -> Budget {
     }
 }
 
-/// Source ranges already given in this MCP session (kept for the last 8 calls per project).
-#[derive(Default)]
+const MAX_HISTORY_CALLS: usize = 32;
+
+/// Source ranges already given in this session (kept for the last 32 calls per project).
+/// Serializable so CLI sessions (`--session` / `CGR_SESSION`) can share the same dedup
+/// state across consecutive invocations as MCP sessions do in-process.
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct History {
-    calls: VecDeque<FxHashMap<String, SentFile>>,
+    #[serde(default)]
+    calls: VecDeque<BTreeMap<String, SentFile>>,
+    #[serde(skip)]
+    dirty: bool,
 }
 
-#[derive(Clone)]
-struct SentFile {
-    fingerprint: (u64, i64),
-    ranges: Vec<(u32, u32)>,
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SentFile {
+    pub(crate) fingerprint: (u64, i64),
+    pub(crate) ranges: Vec<(u32, u32)>,
 }
 
 impl History {
     pub fn new() -> History {
         History::default()
     }
-    fn covered(&self, path: &str, fp: (u64, i64)) -> Vec<(u32, u32)> {
-        let mut out: Vec<(u32, u32)> = Vec::new();
+
+    /// Load a persisted session history, returning an empty history if missing or unreadable.
+    pub fn load(path: &Path) -> History {
+        let Ok(bytes) = std::fs::read(path) else {
+            return History::new();
+        };
+        let mut h: History = serde_json::from_slice(&bytes).unwrap_or_default();
+        while h.calls.len() > MAX_HISTORY_CALLS {
+            h.calls.pop_front();
+        }
+        h.dirty = false;
+        h
+    }
+
+    /// Atomically persist session history (temp file + rename).
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        let bytes = serde_json::to_vec(self).map_err(std::io::Error::other)?;
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)
+    }
+
+    /// Merge this process's most recently recorded call into the latest on-disk session file
+    /// under a per-session advisory lock so parallel CLI calls never overwrite each other.
+    pub fn save_merged(&self, path: &Path) -> std::io::Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        let Some(latest_call) = self.calls.back().cloned() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let lock_path = path.with_extension("lock");
+        let lock = std::fs::OpenOptions::new().create(true).read(true).write(true).truncate(false).open(&lock_path)?;
+        lock.lock()?;
+        let mut disk = History::load(path);
+        disk.record(latest_call);
+        let res = disk.save(path);
+        drop(lock);
+        res
+    }
+
+    pub(crate) fn covered(&self, path: &str, fp: (u64, i64)) -> Vec<(u32, u32)> {
+        let mut raw: Vec<(u32, u32)> = Vec::new();
         for call in &self.calls {
             if let Some(s) = call.get(path) {
                 if s.fingerprint == fp {
-                    out.extend(s.ranges.iter().copied());
+                    raw.extend(s.ranges.iter().copied());
                 }
             }
         }
-        out
+        if raw.len() <= 1 {
+            return raw;
+        }
+        raw.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(raw.len());
+        for (s, e) in raw {
+            match merged.last_mut() {
+                Some(last) if s <= last.1.saturating_add(1) => last.1 = last.1.max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+        merged
     }
-    fn record(&mut self, call: FxHashMap<String, SentFile>) {
+
+    pub(crate) fn is_covered(&self, path: &str, fp: (u64, i64), start: u32, end: u32) -> bool {
+        self.covered(path, fp).iter().any(|c| c.0 <= start && c.1 >= end)
+    }
+
+    pub(crate) fn record(&mut self, call: BTreeMap<String, SentFile>) {
+        // Advance the 32-call sliding window on every history-enabled explore call, including
+        // fully deduplicated calls, so old ranges expire after 32 turns.
         self.calls.push_back(call);
-        while self.calls.len() > 8 {
+        while self.calls.len() > MAX_HISTORY_CALLS {
             self.calls.pop_front();
         }
+        self.dirty = true;
     }
 }
 
 #[derive(Default, Clone)]
 pub struct ExploreOptions {
     pub max_files: Option<usize>,
-    /// Hard output cap override (the prompt hook uses 9,000).
+    /// Hard output cap override (the prompt hook uses 9,000; `--max-chars` / `maxChars` sets this).
     pub max_output: Option<usize>,
+    /// Omit verbatim source bodies and return call flow, blast radius, and symbol outlines only.
+    pub compact: bool,
     /// Session de-duplication history; `None` re-serves source on every call.
     pub history: Option<Arc<Mutex<History>>>,
 }
@@ -120,7 +197,7 @@ impl Graph {
         }
     }
 
-    fn fingerprint(&self, f: FileId) -> (u64, i64) {
+    pub(crate) fn fingerprint(&self, f: FileId) -> (u64, i64) {
         let rec = self.view.file(f);
         (rec.rec.size as u64, rec.rec.mtime_ns)
     }
@@ -326,19 +403,23 @@ impl Graph {
 
         // 6-7. budget and source windows
         let mut total = 0usize;
-        let mut sections: Vec<String> = Vec::new();
+        // Each rendered section plus the optional path recorded into `sent_now` if the full section survives truncation.
+        let mut sections: Vec<(Option<String>, String)> = Vec::new();
         let mut shown_files: Vec<String> = Vec::new();
         let mut shown_symbols: FxHashSet<NodeIdx> = FxHashSet::default();
         let mut stale_files: Vec<String> = Vec::new();
         let mut omitted: Vec<(FileId, Vec<NodeIdx>)> = Vec::new();
-        let mut sent_now: FxHashMap<String, SentFile> = FxHashMap::default();
+        let mut sent_now: BTreeMap<String, SentFile> = BTreeMap::new();
         let mut trimmed_any = false;
-        let mut history = opts.history.as_ref().map(|h| h.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut history = if opts.compact { None } else { opts.history.as_ref().map(|h| h.lock().unwrap_or_else(|e| e.into_inner())) };
         let flow_text = self.render_flow(&flow);
         let blast = self.blast_radius(&exact, &named);
-        let relationships = if budget.extras { self.relationships(&rel) } else { String::new() };
+        let relationships = if budget.extras && !opts.compact { self.relationships(&rel) } else { String::new() };
         let header_reserve = flow_text.len() + blast.len() + relationships.len() + 900 + q.len();
-        let room_for_sources = hard.saturating_sub(header_reserve + 1_200);
+        let epilogue_reserve = if opts.max_output.is_some() { (hard / 8).min(1_200) } else { 1_200 };
+        let room_for_sources = hard.saturating_sub(header_reserve + epilogue_reserve).max(hard / 3);
+        let min_remaining = if opts.compact { 160 } else { (hard / 6).clamp(300, 700) };
+        let effective_per_file = if opts.max_output.is_some() { budget.per_file.min((hard * 3 / 5).max(800)) } else { budget.per_file };
         let mut backrefs_only: Vec<String> = Vec::new();
 
         for grp in &ranked {
@@ -347,22 +428,68 @@ impl Graph {
                 continue;
             }
             let remaining = room_for_sources.saturating_sub(total);
-            if remaining < 700 {
+            if remaining < min_remaining {
                 omitted.push((grp.file, grp.nodes.iter().map(|x| x.0).collect()));
                 continue;
             }
             let path = self.path(grp.file).to_owned();
+            let listed: Vec<(NodeIdx, f32)> = grp.nodes.iter().copied().filter(|(n, _)| is_listed(self.kind(*n))).collect();
+            let stale = self.file_is_stale(grp.file);
+
+            if opts.compact {
+                if stale {
+                    stale_files.push(path.clone());
+                }
+                let mut sym_lines: Vec<String> = Vec::new();
+                let mut seen_nodes: FxHashSet<NodeIdx> = FxHashSet::default();
+                let mut sorted_listed = listed.clone();
+                sorted_listed.sort_by_key(|(n, _)| self.line(*n));
+                for (n, _) in &sorted_listed {
+                    if !seen_nodes.insert(*n) {
+                        continue;
+                    }
+                    shown_symbols.insert(*n);
+                    let start = self.line(*n);
+                    let end = self.end_line(*n).max(start);
+                    let span = if end > start { format!("{start}-{end}") } else { format!("{start}") };
+                    let sig = self.view.node(*n).signature().map(|s| format!(" `{}`", s.split_whitespace().collect::<Vec<_>>().join(" "))).unwrap_or_default();
+                    sym_lines.push(format!("- `{}` ({}){sig} — :{span}", self.name(*n), self.kind(*n)));
+                    if sym_lines.len() >= 16 {
+                        break;
+                    }
+                }
+                let stale_tag = if stale { " · ⚠ changed on disk" } else { "" };
+                let head = format!("**`{path}`** ({}{stale_tag})", plural(sym_lines.len(), "symbol"));
+                let mut section = String::new();
+                section.push_str(&head);
+                section.push('\n');
+                if sym_lines.is_empty() {
+                    section.push_str("- _(file matched)_\n");
+                } else {
+                    for l in &sym_lines {
+                        section.push_str(l);
+                        section.push('\n');
+                    }
+                }
+                if total + section.len() > room_for_sources && !sections.is_empty() {
+                    omitted.push((grp.file, grp.nodes.iter().map(|x| x.0).collect()));
+                    continue;
+                }
+                total += section.len() + 1;
+                sections.push((None, section));
+                shown_files.push(path);
+                continue;
+            }
+
             let lang = self.view.file(grp.file).lang().as_str();
             let Some(lines) = self.read_lines(grp.file) else {
                 omitted.push((grp.file, grp.nodes.iter().map(|x| x.0).collect()));
                 continue;
             };
-            let stale = self.file_is_stale(grp.file);
             let costs = window::line_costs(&lines);
-            let mut cap = if grp.pinned.is_some() || grp.named { (budget.per_file as f32 * 1.6) as usize } else { budget.per_file };
+            let mut cap = if grp.pinned.is_some() || grp.named { (effective_per_file as f32 * 1.6) as usize } else { effective_per_file };
             cap = cap.min(remaining);
 
-            let listed: Vec<(NodeIdx, f32)> = grp.nodes.iter().copied().filter(|(n, _)| is_listed(self.kind(*n))).collect();
             let mut header_syms: Vec<String> = Vec::new();
             let mut ranges: Vec<window::Range>;
             let mut flag = String::new();
@@ -374,8 +501,11 @@ impl Graph {
                     ranges = window::plan(all, 0, &costs, cap * 2);
                     flag = "⚠ changed on disk after the last index sync — showing the file's full current source".to_owned();
                 } else {
-                    sections.push(format!(
-                        "**`{path}`** — ⚠ changed on disk after the last index sync — source omitted (indexed line ranges no longer match, so a slice could show the wrong code). Read this file directly for current content; the change is picked up on that project's next index sync.\n"
+                    sections.push((
+                        None,
+                        format!(
+                            "**`{path}`** — ⚠ changed on disk after the last index sync — source omitted (indexed line ranges no longer match, so a slice could show the wrong code). Read this file directly for current content; the change is picked up on that project's next index sync.\n"
+                        ),
                     ));
                     total += 400;
                     continue;
@@ -437,25 +567,28 @@ impl Graph {
                 }
             }
 
-            // 9. session de-duplication: ranges already sent for this unchanged file
+            // 9. session de-duplication: subtract ranges already sent for this unchanged file (skip stale files)
             let fp = self.fingerprint(grp.file);
             let mut covered_note = String::new();
-            if let Some(h) = history.as_mut() {
-                let covered = h.covered(&path, fp);
-                if !covered.is_empty() {
-                    let fully = |r: &window::Range| covered.iter().any(|c| c.0 <= r.start && c.1 >= r.end);
-                    let (done, fresh): (Vec<window::Range>, Vec<window::Range>) = ranges.iter().cloned().partition(|r| fully(r));
-                    if !done.is_empty() {
-                        let spans: Vec<String> = done.iter().map(|r| format!("{}-{}", r.start, r.end)).collect();
-                        covered_note = format!("> Already sent earlier in this conversation: lines {} of `{path}` (unchanged) — use that copy; don't re-fetch it and don't Read the file.", spans.join(", "));
+            if !stale {
+                if let Some(h) = history.as_mut() {
+                    let covered = h.covered(&path, fp);
+                    if !covered.is_empty() {
+                        let (done, fresh) = subtract_covered(ranges, &covered);
+                        if !done.is_empty() {
+                            let spans: Vec<String> = done.iter().map(|(s, e)| format!("{s}-{e}")).collect();
+                            covered_note = format!("> Already sent earlier in this conversation: lines {} of `{path}` (unchanged) — use that copy; don't re-fetch it and don't Read the file.", spans.join(", "));
+                        }
                         ranges = fresh;
                     }
                 }
             }
             let sent = SentFile { fingerprint: fp, ranges: ranges.iter().map(|r| (r.start, r.end)).collect() };
             if ranges.is_empty() {
-                if !covered_note.is_empty() {
-                    backrefs_only.push(format!("**`{path}`**\n\n{covered_note}\n"));
+                if !covered_note.is_empty() && backrefs_only.len() < 6 {
+                    let note = format!("**`{path}`**\n\n{covered_note}\n");
+                    total += note.len() + 1;
+                    backrefs_only.push(note);
                 }
                 continue;
             }
@@ -471,22 +604,28 @@ impl Graph {
             }
             section.push_str(&format!("```{lang}\n{body}\n```\n"));
             total += section.len() + 1;
-            sections.push(section);
-            shown_files.push(path.clone());
-            sent_now.insert(path, sent);
+            let sent_key = if !stale {
+                sent_now.insert(path.clone(), sent);
+                Some(path.clone())
+            } else {
+                None
+            };
+            sections.push((sent_key, section));
+            shown_files.push(path);
         }
-        // everything was a back-reference: bring back the best file's source (CG-17/18)
-        if sections.is_empty() && !backrefs_only.is_empty() {
-            sections.extend(backrefs_only.into_iter().take(1));
-        }
-        if let Some(h) = history.as_mut() {
-            h.record(sent_now);
+        let n_backrefs = backrefs_only.len();
+        if !backrefs_only.is_empty() {
+            sections.extend(backrefs_only.into_iter().take(6).map(|s| (None, s)));
         }
 
         // 8. render
         let n_syms = shown_symbols.len();
         let n_files = shown_files.len();
-        let mut summary = format!("Found {} across {}.", plural(n_syms, "symbol"), plural(n_files, "file"));
+        let mut summary = if n_files == 0 && n_backrefs > 0 {
+            format!("Found {} across {} (already sent earlier in this conversation).", plural(n_syms, "symbol"), plural(n_backrefs, "file"))
+        } else {
+            format!("Found {} across {}.", plural(n_syms, "symbol"), plural(n_files, "file"))
+        };
         if !pinned.is_empty() {
             summary.push_str(&format!(" {} pinned from the query.", plural(pinned.len(), "file")));
         }
@@ -522,13 +661,33 @@ impl Graph {
         }
         text.push_str(&out.join("\n"));
         text.push('\n');
+        let mut section_ends: Vec<(String, usize)> = Vec::new();
+        let append_sections = |text: &mut String, sections: &[(Option<String>, String)], ends: &mut Vec<(String, usize)>| {
+            for (idx, (key, sec)) in sections.iter().enumerate() {
+                if idx > 0 {
+                    text.push('\n');
+                }
+                text.push_str(sec);
+                if let Some(p) = key {
+                    ends.push((p.clone(), text.len()));
+                }
+            }
+        };
         if n_files > 0 {
-            text.push_str("**Source Code**\n\n");
-            text.push_str(strings::VERBATIM_NOTE);
-            text.push_str("\n\n");
-            text.push_str(&sections.join("\n"));
+            if opts.compact {
+                text.push_str("**Symbols (compact outline)**\n\n");
+                text.push_str(&format!(
+                    "> Compact mode omits source bodies. Drop `compact` or call `{}` on a symbol for verbatim code.\n\n",
+                    strings::tool("node")
+                ));
+            } else {
+                text.push_str("**Source Code**\n\n");
+                text.push_str(strings::VERBATIM_NOTE);
+                text.push_str("\n\n");
+            }
+            append_sections(&mut text, &sections, &mut section_ends);
         } else if !sections.is_empty() {
-            text.push_str(&sections.join("\n"));
+            append_sections(&mut text, &sections, &mut section_ends);
         }
 
         // epilogue: files whose source was not shown, completeness and budget notes
@@ -562,7 +721,7 @@ impl Graph {
             epilogue.push_str(&strings::trimmed_sections_note());
             epilogue.push('\n');
         }
-        if budget.extras {
+        if budget.extras && !opts.compact {
             epilogue.push('\n');
             epilogue.push_str(&strings::budget_note(self.indexed_files(), budget.calls));
             epilogue.push('\n');
@@ -572,16 +731,27 @@ impl Graph {
         } else if text.len() + strings::cut_note(trimmed_any).len() <= hard {
             text.push_str(&strings::cut_note(trimmed_any));
         }
+        let mut cut_boundary: Option<usize> = None;
         if text.len() > hard {
-            // cut at the last whole file section
-            let mut cut = hard.min(text.len());
-            while !text.is_char_boundary(cut) {
+            let note = strings::truncated_note(trimmed_any);
+            // Reserve space for the truncation note so the final output stays strictly within `hard`.
+            let mut cut = hard.saturating_sub(note.len()).min(text.len());
+            while cut > 0 && !text.is_char_boundary(cut) {
                 cut -= 1;
             }
             let head = &text[..cut];
-            let boundary = head.rfind("\n**`").filter(|b| *b > hard / 2).or_else(|| head.rfind('\n')).unwrap_or(cut);
+            let boundary = head.rfind("\n**`").filter(|b| *b > cut / 2).or_else(|| head.rfind('\n')).unwrap_or(cut);
             text.truncate(boundary);
-            text.push_str(&strings::truncated_note(trimmed_any));
+            text.push_str(&note);
+            cut_boundary = Some(boundary);
+        }
+        if let Some(h) = history.as_mut() {
+            if let Some(boundary) = cut_boundary {
+                // Only record files whose ENTIRE rendered section survived truncation.
+                let intact: FxHashSet<&str> = section_ends.iter().filter(|(_, end)| *end <= boundary).map(|(p, _)| p.as_str()).collect();
+                sent_now.retain(|p, _| intact.contains(p.as_str()));
+            }
+            h.record(sent_now);
         }
         ExploreResult { text, files: shown_files, symbols: n_syms, found_named: !exact.is_empty() || !pinned.is_empty() }
     }
@@ -687,6 +857,36 @@ impl Graph {
         }
         lines.join("\n")
     }
+}
+
+fn subtract_covered(ranges: Vec<window::Range>, covered: &[(u32, u32)]) -> (Vec<(u32, u32)>, Vec<window::Range>) {
+    let mut done: Vec<(u32, u32)> = Vec::new();
+    let mut fresh: Vec<window::Range> = Vec::new();
+    for r in ranges {
+        let mut cur = r.start;
+        for &(cs, ce) in covered {
+            if ce < cur {
+                continue;
+            }
+            if cs > r.end {
+                break;
+            }
+            if cs > cur {
+                fresh.push(window::Range { start: cur, end: cs - 1, imp: r.imp, must: r.must });
+            }
+            let ov_s = cur.max(cs);
+            let ov_e = r.end.min(ce);
+            done.push((ov_s, ov_e));
+            cur = ov_e.saturating_add(1);
+            if cur > r.end {
+                break;
+            }
+        }
+        if cur <= r.end {
+            fresh.push(window::Range { start: cur, end: r.end, imp: r.imp, must: r.must });
+        }
+    }
+    (done, fresh)
 }
 
 fn plural(n: usize, word: &str) -> String {

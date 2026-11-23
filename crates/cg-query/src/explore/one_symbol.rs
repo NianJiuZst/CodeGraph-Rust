@@ -5,11 +5,12 @@
 //! definition's verbatim source plus every dependent site with enclosing symbol
 //! and line text instead of filling the full budget with loosely related files.
 
-use crate::explore::{ExploreOptions, ExploreResult};
+use crate::explore::{ExploreOptions, ExploreResult, History, SentFile};
 use crate::graph::Graph;
 use crate::source::SourceView;
 use cg_core::{EdgeKind, FileId, Lang, NodeIdx, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 const MAX_ONE_SYMBOL_DEFS: usize = 3;
@@ -445,10 +446,12 @@ pub fn try_explore_one_symbol(g: &Graph, query: &str, max_chars: usize, opts: &E
         if g.file_is_stale(f) {
             return None;
         }
-        if let std::collections::hash_map::Entry::Vacant(e) = sources.entry(f) {
-            let abs = g.abs_path(g.path(f))?;
-            let sv = SourceView::read(&abs, 1 << 20).ok()?;
-            e.insert(sv);
+        if !opts.compact {
+            if let std::collections::hash_map::Entry::Vacant(e) = sources.entry(f) {
+                let abs = g.abs_path(g.path(f))?;
+                let sv = SourceView::read(&abs, 1 << 20).ok()?;
+                e.insert(sv);
+            }
         }
     }
     let collected: Vec<(NodeIdx, Vec<Site>)> = defs.iter().map(|&d| (d, collect_sites(g, d))).collect();
@@ -477,12 +480,17 @@ pub fn try_explore_one_symbol(g: &Graph, query: &str, max_chars: usize, opts: &E
         }
     }
 
+    let mut history = if opts.compact { None } else { opts.history.as_ref().map(|h| h.lock().unwrap_or_else(|e| e.into_inner())) };
+
     let mut caps = FULL_CAPS;
-    let mut body_chars = (max_chars / 2).clamp(2_000, 8_000);
+    let mut body_chars = (max_chars / 2).min(8_000).max(max_chars.min(600));
     for attempt in 0..=4 {
-        let (mut text, files) = compose(g, &name, &collected, &sources, caps, body_chars);
+        let cfg = ComposeCfg { caps, body_chars, compact: opts.compact, history: history.as_deref() };
+        let (mut text, files, sent_now) = compose(g, &name, &collected, &sources, &cfg);
         if text.len() <= max_chars || attempt == 4 {
+            let mut truncated = false;
             if text.len() > max_chars {
+                truncated = true;
                 let mut cut = max_chars.saturating_sub(42);
                 while cut > 0 && !text.is_char_boundary(cut) {
                     cut -= 1;
@@ -490,6 +498,11 @@ pub fn try_explore_one_symbol(g: &Graph, query: &str, max_chars: usize, opts: &E
                 let at = text[..cut].rfind('\n').unwrap_or(cut);
                 text.truncate(at);
                 text.push_str("\n… (cut to fit the answer's size limit)");
+            }
+            if !truncated {
+                if let Some(h) = history.as_mut() {
+                    h.record(sent_now);
+                }
             }
             return Some(ExploreResult { text, files, symbols: defs.len(), found_named: true });
         }
@@ -499,18 +512,25 @@ pub fn try_explore_one_symbol(g: &Graph, query: &str, max_chars: usize, opts: &E
     unreachable!()
 }
 
+struct ComposeCfg<'a> {
+    caps: Caps,
+    body_chars: usize,
+    compact: bool,
+    history: Option<&'a History>,
+}
+
 fn compose(
     g: &Graph,
     name: &str,
     collected: &[(NodeIdx, Vec<Site>)],
     sources: &FxHashMap<FileId, SourceView>,
-    caps: Caps,
-    body_chars: usize,
-) -> (String, Vec<String>) {
+    cfg: &ComposeCfg<'_>,
+) -> (String, Vec<String>, BTreeMap<String, SentFile>) {
     let mut out = String::new();
     let mut file_set: FxHashSet<FileId> = FxHashSet::default();
-    let per_def_body = (body_chars / collected.len().max(1)).max(600);
-    let per_def_caps = if collected.len() == 1 { caps } else { caps.halve() };
+    let mut sent_now: BTreeMap<String, SentFile> = BTreeMap::new();
+    let per_def_body = (cfg.body_chars / collected.len().max(1)).max(600);
+    let per_def_caps = if collected.len() == 1 { cfg.caps } else { cfg.caps.halve() };
 
     if collected.len() > 1 {
         let _ = writeln!(out, "**{} definitions named `{name}`** — each with every place that depends on it.\n", collected.len());
@@ -557,17 +577,40 @@ fn compose(
 
         let lang = g.view.file(def_file).lang().as_str();
         let _ = writeln!(out, "**`{def_path}`** — `{}`, line{} {span}\n", g.name(*def), if end > start { "s" } else { "" });
-        if let Some(sv) = sources.get(&def_file) {
+        if cfg.compact {
+            if let Some(sig) = g.view.node(*def).signature() {
+                let _ = writeln!(out, "**Signature:** `{}`\n", sig.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+            let _ = writeln!(out, "> Compact mode omits source bodies. Drop `compact` or call `node` for verbatim code.\n");
+        } else if let Some(sv) = sources.get(&def_file) {
             let (body, shown_to, cut) = render_body(sv, start, end, per_def_body);
-            let _ = writeln!(out, "```{lang}\n{body}\n```");
-            if cut {
+            let fp = g.fingerprint(def_file);
+            if cfg.history.is_some_and(|h| h.is_covered(def_path, fp, start, shown_to)) {
                 let _ = writeln!(
                     out,
-                    "(lines {start}–{shown_to} of {start}–{end} shown — pass `node` with `file: \"{def_path}\"` and `offset: {}` for the rest)",
-                    shown_to + 1
+                    "> Already sent earlier in this conversation: lines {start}-{shown_to} of `{def_path}` (unchanged) — use that copy; don't re-fetch it and don't Read the file.\n"
                 );
+            } else {
+                let _ = writeln!(out, "```{lang}\n{body}\n```");
+                if cut {
+                    let _ = writeln!(
+                        out,
+                        "(lines {start}–{shown_to} of {start}–{end} shown — pass `node` with `file: \"{def_path}\"` and `offset: {}` for the rest)",
+                        shown_to + 1
+                    );
+                }
+                out.push('\n');
+                let entry = sent_now.entry(def_path.to_owned()).or_insert_with(|| SentFile { fingerprint: fp, ranges: Vec::new() });
+                entry.ranges.push((start, shown_to));
             }
-            out.push('\n');
+        }
+
+        if prod_usage.is_empty() && tests.is_empty() {
+            let unresolved = g.view.unresolved_refs_by_tail(g.name(*def), cg_store::UnresolvedScope::Dependency, 5);
+            let hint = crate::tools::format_unresolved_hint(g, g.name(*def), "references", &unresolved);
+            if !hint.is_empty() {
+                let _ = writeln!(out, "{hint}\n");
+            }
         }
 
         // Production sites grouped by relation
@@ -683,11 +726,17 @@ fn compose(
                     .collect();
                 let more = if callees.len() > per_def_caps.callees { ", …" } else { "" };
                 let _ = writeln!(out, "**Calls** {}{more}\n", shown.join(", "));
+            } else {
+                let outgoing = g.view.unresolved_refs_from(*def, cg_store::UnresolvedScope::CallLike, 5);
+                let hint = crate::tools::format_unresolved_hint(g, g.name(*def), "callees", &outgoing);
+                if !hint.is_empty() {
+                    let _ = writeln!(out, "{hint}\n");
+                }
             }
         }
     }
 
     let mut files: Vec<String> = file_set.into_iter().map(|f| g.path(f).to_owned()).collect();
     files.sort();
-    (out.trim_end().to_owned(), files)
+    (out.trim_end().to_owned(), files, sent_now)
 }

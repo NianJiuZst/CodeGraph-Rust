@@ -17,7 +17,7 @@ pub const UPSTREAM_CONFIG_FILE: &str = "codegraph.json";
 pub const CONFIG_FILE: &str = "cgr.json";
 /// Version of the resolution rules: changing resolver behaviour bumps this, which
 /// marks older indexes as "built by an older engine" (design doc 5.8).
-pub const ENGINE_VERSION: u32 = 14;
+pub const ENGINE_VERSION: u32 = 15;
 /// Version of the on-disk segment format; a mismatch forces a full rebuild.
 pub const FORMAT_VERSION: u32 = 2;
 /// The upstream commit whose kernel is vendored (see crates/cg-kernel/UPSTREAM_COMMIT).
@@ -35,6 +35,8 @@ pub mod env {
     pub const FSYNC: &str = "CGR_FSYNC";
     pub const LOG: &str = "CGR_LOG";
     pub const TIMINGS: &str = "CGR_TIMINGS";
+    pub const AUTO_SYNC: &str = "CGR_AUTO_SYNC";
+    pub const SESSION: &str = "CGR_SESSION";
 
     /// `name` if set and non-empty, else `fallback`.
     pub fn get(name: &str, fallback: Option<&str>) -> Option<String> {

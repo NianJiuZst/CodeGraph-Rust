@@ -19,6 +19,15 @@ struct Cli {
     /// Project directory (default: the current directory; the nearest `.cgr/` above it is used)
     #[arg(short = 'p', long = "path", global = true)]
     project: Option<PathBuf>,
+    /// Incrementally sync index changes before querying (also enabled by CGR_AUTO_SYNC=1)
+    #[arg(long = "sync", global = true, conflicts_with = "no_sync")]
+    auto_sync: bool,
+    /// Skip automatic sync even when CGR_AUTO_SYNC=1 is set
+    #[arg(long = "no-sync", global = true)]
+    no_sync: bool,
+    /// Session ID for cross-call explore deduplication (also read from CGR_SESSION)
+    #[arg(long = "session", global = true, value_name = "ID")]
+    session: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -80,10 +89,20 @@ enum Cmd {
         query: Vec<String>,
         #[arg(long)]
         max_files: Option<usize>,
+        /// Hard character budget cap (1000–50000)
+        #[arg(long)]
+        max_chars: Option<usize>,
+        /// Return flow, blast radius, and symbol outlines without full source bodies
+        #[arg(long)]
+        compact: bool,
+        /// Ignore session deduplication history for this call
+        #[arg(long)]
+        no_dedup: bool,
     },
-    /// Read a symbol (with trail) or a file
+    /// Read one or more symbols (with trail) or files
     Node {
-        symbol_or_file: String,
+        #[arg(required = true, num_args = 1..)]
+        targets: Vec<String>,
         /// Include the symbol's source
         #[arg(long)]
         code: bool,
@@ -95,6 +114,9 @@ enum Cmd {
         limit: Option<usize>,
         #[arg(long)]
         symbols_only: bool,
+        /// File mode: hard character budget cap (1000–100000, default 38000)
+        #[arg(long)]
+        max_chars: Option<usize>,
     },
     /// Indexed file tree
     Files {
@@ -114,33 +136,37 @@ enum Cmd {
         #[arg(long)]
         max_depth: Option<usize>,
     },
-    /// Functions that call a symbol
+    /// Functions that call one or more symbols
     Callers {
-        symbol: String,
+        #[arg(required = true, num_args = 1..)]
+        symbols: Vec<String>,
         #[arg(long)]
         file: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Functions a symbol calls
+    /// Functions one or more symbols call
     Callees {
-        symbol: String,
+        #[arg(required = true, num_args = 1..)]
+        symbols: Vec<String>,
         #[arg(long)]
         file: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Symbols affected by changing a symbol
+    /// Symbols affected by changing one or more symbols
     Impact {
-        symbol: String,
+        #[arg(required = true, num_args = 1..)]
+        symbols: Vec<String>,
         #[arg(long)]
         file: Option<String>,
         #[arg(short, long, default_value_t = 2)]
         depth: u32,
     },
-    /// Implementations / subtypes of an interface, abstract class or method
+    /// Implementations / subtypes of one or more interfaces, abstract classes, or methods
     Implementations {
-        symbol: String,
+        #[arg(required = true, num_args = 1..)]
+        symbols: Vec<String>,
         /// Maximum inheritance depth to traverse
         #[arg(short, long, default_value_t = 10)]
         depth: u32,
@@ -369,23 +395,36 @@ fn main() {
 
 fn run(cli: Cli) -> Result<i32> {
     let base = cli.project;
+    let sync = if cli.auto_sync {
+        cmds::SyncMode::Explicit
+    } else if cli.no_sync {
+        cmds::SyncMode::Off
+    } else if cg_core::brand::env::get(cg_core::brand::env::AUTO_SYNC, None).is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
+        cmds::SyncMode::Auto
+    } else {
+        cmds::SyncMode::Off
+    };
+    let session = cli.session.or_else(|| cg_core::brand::env::get(cg_core::brand::env::SESSION, None));
+    let qctx = cmds::QueryCtx { base: base.clone(), sync, session };
     match cli.cmd {
         Cmd::Init { path, local_only } => cmds::init(path.or(base), local_only),
         Cmd::Index { path, force, quiet, timings, report_json } => cmds::index(path.or(base), force, quiet, timings, report_json),
         Cmd::Sync { path, quiet } => cmds::sync(path.or(base), quiet),
         Cmd::Status { path, json, strict, verify } => cmds::status(path.or(base), json, strict, verify),
-        Cmd::Query { search, kind, limit, json } => cmds::query(base, &search, kind, limit, json),
-        Cmd::Explore { query, max_files } => cmds::explore(base, &query.join(" "), max_files),
-        Cmd::Node { symbol_or_file, code, file, offset, limit, symbols_only } => cmds::node(base, &symbol_or_file, code, file, offset, limit, symbols_only),
-        Cmd::Files { dir, pattern, format, no_metadata, tests, no_tests, max_depth } => {
-            cmds::files(base, dir, pattern, &format, !no_metadata, tests, no_tests, max_depth)
+        Cmd::Query { search, kind, limit, json } => cmds::query(&qctx, &search, kind, limit, json),
+        Cmd::Explore { query, max_files, max_chars, compact, no_dedup } => cmds::explore(&qctx, &query.join(" "), max_files, max_chars, compact, no_dedup),
+        Cmd::Node { targets, code, file, offset, limit, symbols_only, max_chars } => {
+            cmds::node(&qctx, &targets, cmds::NodeArgs { code, file, offset, limit, symbols_only, max_chars })
         }
-        Cmd::Callers { symbol, file, limit } => cmds::callers(base, &symbol, file, limit, true),
-        Cmd::Callees { symbol, file, limit } => cmds::callers(base, &symbol, file, limit, false),
-        Cmd::Impact { symbol, file, depth } => cmds::impact(base, &symbol, file, depth),
-        Cmd::Implementations { symbol, depth } => cmds::implementations(base, &symbol, depth),
-        Cmd::Affected { files, stdin, depth, filter, cross_tier, json, quiet } => cmds::affected(base, files, stdin, depth, filter, cross_tier, json, quiet),
-        Cmd::Cycles { path, json } => cmds::cycles(path.or(base), json),
+        Cmd::Files { dir, pattern, format, no_metadata, tests, no_tests, max_depth } => {
+            cmds::files(&qctx, dir, pattern, &format, !no_metadata, tests, no_tests, max_depth)
+        }
+        Cmd::Callers { symbols, file, limit } => cmds::callers(&qctx, &symbols, file, limit, true),
+        Cmd::Callees { symbols, file, limit } => cmds::callers(&qctx, &symbols, file, limit, false),
+        Cmd::Impact { symbols, file, depth } => cmds::impact(&qctx, &symbols, file, depth),
+        Cmd::Implementations { symbols, depth } => cmds::implementations(&qctx, &symbols, depth),
+        Cmd::Affected { files, stdin, depth, filter, cross_tier, json, quiet } => cmds::affected(&qctx, files, stdin, depth, filter, cross_tier, json, quiet),
+        Cmd::Cycles { path, json } => cmds::cycles(path.or(base), sync, json),
         Cmd::Serve { mcp: _, http, token, no_watch } => cmds::serve(base, http, token, no_watch),
         Cmd::Install { agents, local, no_hook, no_permissions, dry_run, bin } => {
             cmds::install(base, agents, local, !no_hook, !no_permissions, dry_run, bin, true)

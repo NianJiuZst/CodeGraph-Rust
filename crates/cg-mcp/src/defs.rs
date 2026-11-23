@@ -104,6 +104,7 @@ pub fn definition(short: &str) -> Value {
                 "offset": {"type": "number", "description": "File mode: 1-based line to start reading from, exactly like Read's offset. Defaults to the start of the file."},
                 "limit": {"type": "number", "description": "File mode: maximum number of lines to return, exactly like Read's limit. Defaults to the whole file (capped at 2000 lines, like Read)."},
                 "symbolsOnly": {"type": "boolean", "description": "File mode: return just the file's symbol map + dependents (a cheap structural overview) instead of its source.", "default": false},
+                "maxChars": {"type": "number", "description": "File mode: optional character budget cap (1000–100000, default: 38000)."},
                 "line": {"type": "number", "description": "Symbol mode only: disambiguate to the definition at/around this line (use with the file:line a trail showed you)."},
                 "projectPath": pp,
             }, "required": []},
@@ -115,6 +116,8 @@ pub fn definition(short: &str) -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Symbol names, file names, or short code terms to explore (e.g., \"AuthService loginUser session-manager\", \"GraphTraverser BFS impact traversal.ts\"). For a flow question, name the symbols spanning the flow (e.g. \"mutateElement renderScene\"). A natural-language question works too."},
                 "maxFiles": {"type": "number", "description": "Maximum number of files to return source from, 1–20. Omit it to use a default sized to the project (4 files below 150 indexed files, 5 below 500, 8 otherwise). Total output is also capped by characters (about 13K–24K by project size), so a higher maxFiles spreads that budget over more files rather than returning more text."},
+                "maxChars": {"type": "number", "description": "Optional hard character budget cap (1000–50000) to tighten or widen response size."},
+                "compact": {"type": "boolean", "description": "Return call flow, blast radius, and symbol outlines without verbatim source bodies (low-context triage mode).", "default": false},
                 "projectPath": pp,
             }, "required": ["query"]},
             "annotations": read_only(),

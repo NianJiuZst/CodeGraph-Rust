@@ -437,24 +437,24 @@ languages have no framework route rules yet. Dart, Scala, Lua, Luau and R are de
 
 ## Command-line reference
 
-Use `cgr --help` or `cgr <command> --help` for the full option list. `--path` / `-p` selects a
-project explicitly, for example `cgr --path /path/to/project explore "UserService save"`.
-Query commands can locate an index in the current directory or an ancestor.
+Use `cgr --help` or `cgr <command> --help` for the full option list. Global flags `--path` / `-p`,
+`--sync` / `--no-sync` (or `CGR_AUTO_SYNC=1`), and `--session <ID>` (or `CGR_SESSION`) work across
+query commands, which automatically locate the nearest `.cgr/` index at or above the working directory.
 
 | Command | Purpose |
 |---|---|
 | `cgr init [path]` | Create `.cgr/` and build a full index |
 | `cgr index [path] --timings` | Rebuild the full graph and report phase timings |
 | `cgr sync [path]` | Reconcile additions, edits and deletions with the index |
-| `cgr status --json --verify` | Report counts, changes and snapshot checksum verification |
+| `cgr status --json --verify` | Report counts, reference resolution stats (`refs`), changes and checksums |
 | `cgr status --strict` | Return a nonzero status when the index has pending changes |
-| `cgr explore <query…>` | Retrieve related source, call paths and impact |
+| `cgr explore <query…> [--compact] [--max-chars N]` | Retrieve related source (or compact outlines), call paths and impact |
 | `cgr query <text> --kind function --json` | Search symbols, optionally filtering by kind |
-| `cgr node <symbol-or-file> --code` | Inspect a symbol or file and its source |
+| `cgr node <targets…> --code [--max-chars N]` | Inspect one or more symbols or files and their source in a single open |
 | `cgr files [--tests\|--no-tests] [--format package]` | List indexed files by tree, language, or package |
-| `cgr callers <symbol>` / `cgr callees <symbol>` | Follow incoming or outgoing calls |
-| `cgr impact <symbol> --depth 2` | Inspect the graph neighborhood affected by a change |
-| `cgr implementations <symbol> --depth 10` | Find implementations or subtypes |
+| `cgr callers <symbols…>` / `cgr callees <symbols…>` | Follow incoming or outgoing calls (with dynamic/ambiguous hints on 0 hits) |
+| `cgr impact <symbols…> --depth 2` | Inspect the graph neighborhood affected by changing one or more symbols |
+| `cgr implementations <symbols…> --depth 10` | Find implementations or subtypes |
 | `cgr affected <files…> [--cross-tier] --json` | Find test files connected to changed files |
 | `cgr cycles --json` | Report import cycles; exit 1 when cycles are found |
 | `cgr export --sqlite graph.sqlite` | Export a queryable SQLite graph |
@@ -604,6 +604,8 @@ flags for downstream ranking and analysis.
 | `CGR_MEMORY_MB` | Tuning budget for workers, batches, kernel spill and resolver caches; not an RSS cap |
 | `CGR_MCP_TOOLS` | Comma-separated list of exposed MCP tools; `CODEGRAPH_MCP_TOOLS` is a fallback |
 | `CGR_EXPLORE_DEDUP=1` | Skip source already returned in the same durable MCP conversation |
+| `CGR_SESSION` | Session ID for persistent cross-call CLI `explore` deduplication (`.cgr/sessions/`) |
+| `CGR_AUTO_SYNC=1` | Incrementally sync stale index changes before CLI queries (overridable via `--no-sync`) |
 | `CGR_NO_PROMPT_HOOK=1` | Disable the optional Claude Code prompt hook at runtime |
 | `CGR_HTTP_TOKEN` | Require a bearer token on HTTP requests |
 | `CGR_LOG` | Service log filter, default `warn`; logs go to stderr |
