@@ -10,7 +10,7 @@ use cg_store::dump;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyncMode {
@@ -31,7 +31,9 @@ pub struct NodeArgs {
     pub offset: Option<usize>,
     pub limit: Option<usize>,
     pub symbols_only: bool,
+    pub compact: bool,
     pub max_chars: Option<usize>,
+    pub no_dedup: bool,
 }
 
 fn start_dir(p: Option<PathBuf>) -> Result<PathBuf> {
@@ -44,24 +46,66 @@ fn open(p: Option<PathBuf>) -> Result<Project> {
     Project::locate(&start).map_err(|e| anyhow!("{e} (looked above {}; run `{} init` first)", start.display(), brand::BIN_NAME))
 }
 
-fn open_for_query(p: Option<PathBuf>, sync: SyncMode) -> Result<Project> {
+#[derive(Default)]
+struct QuerySyncStat {
+    checked: bool,
+    synced: bool,
+    sync_ms: f64,
+}
+
+fn open_for_query(p: Option<PathBuf>, sync: SyncMode) -> Result<(Project, QuerySyncStat)> {
     let start = start_dir(p)?;
     let store = cg_store::Store::locate(&start)
         .ok_or_else(|| anyhow!("no {} index found above {} (run `{} init` first)", brand::DATA_DIR, start.display(), brand::BIN_NAME))?;
+    let mut stat = QuerySyncStat::default();
     if sync != SyncMode::Off {
+        stat.checked = true;
         let timeout = match sync {
             SyncMode::Explicit => Duration::from_secs(5),
             SyncMode::Auto => Duration::from_millis(150),
             SyncMode::Off => unreachable!(),
         };
         let opts = cg_sync::SyncOptions { lock_timeout: Some(timeout), ..Default::default() };
-        if let Err(e) = cg_sync::sync(&store.root, &opts) {
-            if sync == SyncMode::Explicit {
-                eprintln!("warning: sync skipped ({e}); answering from existing snapshot");
+        let t_sync = Instant::now();
+        match cg_sync::sync(&store.root, &opts) {
+            Ok(rep) => {
+                stat.synced = !rep.up_to_date;
+                stat.sync_ms = t_sync.elapsed().as_secs_f64() * 1e3;
+            }
+            Err(e) => {
+                stat.sync_ms = t_sync.elapsed().as_secs_f64() * 1e3;
+                if sync == SyncMode::Explicit {
+                    eprintln!("warning: sync skipped ({e}); answering from existing snapshot");
+                }
             }
         }
     }
-    Project::open(store).map_err(|e| anyhow!("{e}"))
+    let proj = Project::open(store).map_err(|e| anyhow!("{e}"))?;
+    Ok((proj, stat))
+}
+
+fn load_session(ctx: &QueryCtx, root: &Path, disabled: bool) -> (Option<Arc<Mutex<History>>>, Option<PathBuf>) {
+    if disabled {
+        return (None, None);
+    }
+    match ctx.session.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(sid) => {
+            let path = session_path(root, sid);
+            (Some(Arc::new(Mutex::new(History::load(&path)))), Some(path))
+        }
+        None => (None, None),
+    }
+}
+
+fn save_session(history: Option<Arc<Mutex<History>>>, sess_file: Option<PathBuf>) {
+    if let (Some(h), Some(path)) = (history, sess_file) {
+        let guard = h.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.save_merged(&path).is_ok() {
+            if let Some(dir) = path.parent() {
+                prune_sessions(dir);
+            }
+        }
+    }
 }
 
 fn fnv1a_64(bytes: &[u8]) -> u64 {
@@ -97,10 +141,29 @@ fn prune_sessions(dir: &Path) {
     }
 }
 
-fn call_proj(proj: &Project, tool: &str, args: serde_json::Value, history: Option<Arc<Mutex<History>>>) -> i32 {
-    let env = ToolEnv { graph: &proj.graph, history, status: proj.status_info() };
+fn call_proj(proj: &Project, tool: &str, args: serde_json::Value, history: Option<Arc<Mutex<History>>>, sync_stat: &QuerySyncStat, t0: Instant) -> i32 {
+    let dedup_enabled = history.is_some() && !args.get("noDedup").and_then(|v| v.as_bool()).unwrap_or(false);
+    let status = proj.status_info();
+    let gen = status.generation;
+    let env = ToolEnv { graph: &proj.graph, history, status };
     let out = tools::call(&env, tool, &args);
     println!("{}", out.text);
+    cg_query::telemetry::record(cg_query::telemetry::CallStats {
+        mode: "cli",
+        tool,
+        project: proj.root(),
+        duration_ms: t0.elapsed().as_secs_f64() * 1e3,
+        sync_checked: sync_stat.checked,
+        synced: sync_stat.synced,
+        sync_ms: sync_stat.sync_ms,
+        generation: gen,
+        output_bytes: out.text.len(),
+        compact: args.get("compact").and_then(|v| v.as_bool()).unwrap_or(false) || args.get("symbolsOnly").and_then(|v| v.as_bool()).unwrap_or(false),
+        max_chars: args.get("maxChars").and_then(|v| v.as_u64()).map(|n| n as usize),
+        dedup_enabled,
+        meta: out.meta,
+        is_error: out.is_error,
+    });
     if out.is_error {
         1
     } else {
@@ -109,8 +172,9 @@ fn call_proj(proj: &Project, tool: &str, args: serde_json::Value, history: Optio
 }
 
 fn call(ctx: &QueryCtx, tool: &str, args: serde_json::Value) -> Result<i32> {
-    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
-    Ok(call_proj(&proj, tool, args, None))
+    let t0 = Instant::now();
+    let (proj, sync_stat) = open_for_query(ctx.base.clone(), ctx.sync)?;
+    Ok(call_proj(&proj, tool, args, None, &sync_stat, t0))
 }
 
 pub fn init(path: Option<PathBuf>, local_only: bool) -> Result<i32> {
@@ -229,15 +293,19 @@ pub fn status(path: Option<PathBuf>, json: bool, strict: bool, verify: bool) -> 
     Ok(0)
 }
 
-pub fn query(ctx: &QueryCtx, search: &str, kind: Option<String>, limit: usize, json_out: bool) -> Result<i32> {
+pub fn query(ctx: &QueryCtx, search: &str, kind: Option<String>, limit: usize, max_chars: Option<usize>, json_out: bool) -> Result<i32> {
     if !json_out {
         let mut args = json!({"query": search, "limit": limit});
         if let Some(k) = kind {
             args["kind"] = json!(k);
         }
+        if let Some(mc) = max_chars {
+            args["maxChars"] = json!(mc);
+        }
         return call(ctx, "search", args);
     }
-    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
+    let t0 = Instant::now();
+    let (proj, sync_stat) = open_for_query(ctx.base.clone(), ctx.sync)?;
     let g = &proj.graph;
     let kinds: Vec<cg_core::NodeKind> =
         kind.as_deref().and_then(|k| if k == "type" { Some(cg_core::NodeKind::TypeAlias) } else { cg_core::NodeKind::parse(k) }).into_iter().collect();
@@ -252,48 +320,92 @@ pub fn query(ctx: &QueryCtx, search: &str, kind: Option<String>, limit: usize, j
             })
         })
         .collect();
-    println!("{}", serde_json::to_string_pretty(&json!({"schema": 1, "results": arr}))?);
+    let out = if let Some(cap) = max_chars {
+        let mut kept: Vec<serde_json::Value> = Vec::new();
+        let mut truncated = false;
+        for item in arr {
+            kept.push(item);
+            let candidate = serde_json::to_string_pretty(&json!({"schema": 1, "truncated": true, "results": kept}))?;
+            if candidate.len() > cap && kept.len() > 1 {
+                kept.pop();
+                truncated = true;
+                break;
+            }
+        }
+        if truncated {
+            serde_json::to_string_pretty(&json!({"schema": 1, "truncated": true, "results": kept}))?
+        } else {
+            serde_json::to_string_pretty(&json!({"schema": 1, "results": kept}))?
+        }
+    } else {
+        serde_json::to_string_pretty(&json!({"schema": 1, "results": arr}))?
+    };
+    println!("{out}");
+    cg_query::telemetry::record(cg_query::telemetry::CallStats {
+        mode: "cli",
+        tool: "search",
+        project: proj.root(),
+        duration_ms: t0.elapsed().as_secs_f64() * 1e3,
+        sync_checked: sync_stat.checked,
+        synced: sync_stat.synced,
+        sync_ms: sync_stat.sync_ms,
+        generation: proj.snap.manifest.generation,
+        output_bytes: out.len(),
+        compact: false,
+        max_chars,
+        dedup_enabled: false,
+        meta: Default::default(),
+        is_error: false,
+    });
     Ok(0)
 }
 
 pub fn explore(ctx: &QueryCtx, query: &str, max_files: Option<usize>, max_chars: Option<usize>, compact: bool, no_dedup: bool) -> Result<i32> {
-    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
-    let mut args = json!({"query": query, "compact": compact});
+    let t0 = Instant::now();
+    let (proj, sync_stat) = open_for_query(ctx.base.clone(), ctx.sync)?;
+    let mut args = json!({"query": query, "compact": compact, "noDedup": no_dedup});
     if let Some(m) = max_files {
         args["maxFiles"] = json!(m);
     }
     if let Some(c) = max_chars {
         args["maxChars"] = json!(c);
     }
-    let sess = if !no_dedup && !compact { ctx.session.as_deref().map(str::trim).filter(|s| !s.is_empty()) } else { None };
-    let (history, sess_file) = match sess {
-        Some(sid) => {
-            let path = session_path(proj.root(), sid);
-            (Some(Arc::new(Mutex::new(History::load(&path)))), Some(path))
-        }
-        None => (None, None),
-    };
-    let code = call_proj(&proj, "explore", args, history.clone());
-    if let (Some(h), Some(path)) = (history, sess_file) {
-        let guard = h.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.save_merged(&path).is_ok() {
-            if let Some(dir) = path.parent() {
-                prune_sessions(dir);
-            }
-        }
-    }
+    let (history, sess_file) = load_session(ctx, proj.root(), no_dedup || compact);
+    let code = call_proj(&proj, "explore", args, history.clone(), &sync_stat, t0);
+    save_session(history, sess_file);
     Ok(code)
 }
 
 pub fn node(ctx: &QueryCtx, targets: &[String], opts: NodeArgs) -> Result<i32> {
-    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
-    let env = ToolEnv { graph: &proj.graph, history: None, status: proj.status_info() };
+    let t0 = Instant::now();
+    let (proj, sync_stat) = open_for_query(ctx.base.clone(), ctx.sync)?;
+    let (history, sess_file) = load_session(ctx, proj.root(), opts.no_dedup);
+    let status = proj.status_info();
+    let gen = status.generation;
+    let env = ToolEnv { graph: &proj.graph, history: history.clone(), status };
     let mut parts: Vec<String> = Vec::with_capacity(targets.len());
     let mut any_err = false;
-    for target in targets {
+    let mut meta = cg_query::tools::ToolMeta::default();
+    let mut used = 0usize;
+    for (idx, target) in targets.iter().enumerate() {
+        let sep = if idx > 0 { 7 } else { 0 };
+        let mut per_cap = opts.max_chars;
+        if let Some(total_cap) = opts.max_chars {
+            if idx > 0 {
+                let remaining = total_cap.saturating_sub(used + sep);
+                if remaining < 560 {
+                    parts.push(format!("> … +{} more target(s) omitted to fit `--max-chars {total_cap}`.", targets.len() - idx));
+                    break;
+                }
+                per_cap = Some(remaining);
+            }
+        }
         // A name that resolves to a symbol is a symbol; otherwise treat the argument as a file.
         let is_symbol = !proj.graph.resolve_symbol(target).is_empty();
-        let mut args = json!({"includeCode": opts.code});
+        let mut args = json!({"includeCode": opts.code, "compact": opts.compact, "noDedup": opts.no_dedup});
+        if let Some(mc) = per_cap {
+            args["maxChars"] = json!(mc);
+        }
         if is_symbol {
             args["symbol"] = json!(target);
             if let Some(f) = &opts.file {
@@ -307,16 +419,33 @@ pub fn node(ctx: &QueryCtx, targets: &[String], opts: NodeArgs) -> Result<i32> {
             if let Some(l) = opts.limit {
                 args["limit"] = json!(l);
             }
-            if let Some(mc) = opts.max_chars {
-                args["maxChars"] = json!(mc);
-            }
             args["symbolsOnly"] = json!(opts.symbols_only);
         }
         let out = tools::call(&env, "node", &args);
         any_err |= out.is_error;
+        meta.merge(&out.meta);
+        used += sep + out.text.len();
         parts.push(out.text);
     }
-    println!("{}", parts.join("\n\n---\n\n"));
+    let joined = parts.join("\n\n---\n\n");
+    println!("{joined}");
+    save_session(history, sess_file);
+    cg_query::telemetry::record(cg_query::telemetry::CallStats {
+        mode: "cli",
+        tool: "node",
+        project: proj.root(),
+        duration_ms: t0.elapsed().as_secs_f64() * 1e3,
+        sync_checked: sync_stat.checked,
+        synced: sync_stat.synced,
+        sync_ms: sync_stat.sync_ms,
+        generation: gen,
+        output_bytes: joined.len(),
+        compact: opts.compact || opts.symbols_only,
+        max_chars: opts.max_chars,
+        dedup_enabled: ctx.session.as_deref().is_some_and(|s| !s.trim().is_empty()) && !opts.no_dedup,
+        meta,
+        is_error: any_err,
+    });
     Ok(if any_err { 1 } else { 0 })
 }
 
@@ -330,6 +459,7 @@ pub fn files(
     tests_only: bool,
     exclude_tests: bool,
     max_depth: Option<usize>,
+    max_chars: Option<usize>,
 ) -> Result<i32> {
     let mut args = json!({"format": format, "includeMetadata": meta, "testsOnly": tests_only, "excludeTests": exclude_tests});
     if let Some(d) = dir {
@@ -341,67 +471,184 @@ pub fn files(
     if let Some(m) = max_depth {
         args["maxDepth"] = json!(m);
     }
+    if let Some(mc) = max_chars {
+        args["maxChars"] = json!(mc);
+    }
     call(ctx, "files", args)
 }
 
-pub fn callers(ctx: &QueryCtx, symbols: &[String], file: Option<String>, limit: usize, callers: bool) -> Result<i32> {
-    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
-    let env = ToolEnv { graph: &proj.graph, history: None, status: proj.status_info() };
+pub fn callers(ctx: &QueryCtx, symbols: &[String], file: Option<String>, limit: usize, max_chars: Option<usize>, no_dedup: bool, callers: bool) -> Result<i32> {
+    let t0 = Instant::now();
+    let (proj, sync_stat) = open_for_query(ctx.base.clone(), ctx.sync)?;
+    let (history, sess_file) = load_session(ctx, proj.root(), no_dedup);
+    let status = proj.status_info();
+    let gen = status.generation;
+    let env = ToolEnv { graph: &proj.graph, history: history.clone(), status };
     let tool = if callers { "callers" } else { "callees" };
     let mut parts: Vec<String> = Vec::with_capacity(symbols.len());
     let mut any_err = false;
-    for symbol in symbols {
-        let mut args = json!({"symbol": symbol, "limit": limit});
+    let mut meta = cg_query::tools::ToolMeta::default();
+    let mut used = 0usize;
+    for (idx, symbol) in symbols.iter().enumerate() {
+        let sep = if idx > 0 { 7 } else { 0 };
+        let mut per_cap = max_chars;
+        if let Some(total_cap) = max_chars {
+            if idx > 0 {
+                let remaining = total_cap.saturating_sub(used + sep);
+                if remaining < 560 {
+                    parts.push(format!("> … +{} more symbol(s) omitted to fit `--max-chars {total_cap}`.", symbols.len() - idx));
+                    break;
+                }
+                per_cap = Some(remaining);
+            }
+        }
+        let mut args = json!({"symbol": symbol, "limit": limit, "noDedup": no_dedup});
         if let Some(f) = &file {
             args["file"] = json!(f);
         }
+        if let Some(mc) = per_cap {
+            args["maxChars"] = json!(mc);
+        }
         let out = tools::call(&env, tool, &args);
         any_err |= out.is_error;
+        meta.merge(&out.meta);
+        used += sep + out.text.len();
         parts.push(out.text);
     }
-    println!("{}", parts.join("\n\n---\n\n"));
+    let joined = parts.join("\n\n---\n\n");
+    println!("{joined}");
+    save_session(history, sess_file);
+    cg_query::telemetry::record(cg_query::telemetry::CallStats {
+        mode: "cli",
+        tool,
+        project: proj.root(),
+        duration_ms: t0.elapsed().as_secs_f64() * 1e3,
+        sync_checked: sync_stat.checked,
+        synced: sync_stat.synced,
+        sync_ms: sync_stat.sync_ms,
+        generation: gen,
+        output_bytes: joined.len(),
+        compact: false,
+        max_chars,
+        dedup_enabled: ctx.session.as_deref().is_some_and(|s| !s.trim().is_empty()) && !no_dedup,
+        meta,
+        is_error: any_err,
+    });
     Ok(if any_err { 1 } else { 0 })
 }
 
-pub fn impact(ctx: &QueryCtx, symbols: &[String], file: Option<String>, depth: u32) -> Result<i32> {
-    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
-    let env = ToolEnv { graph: &proj.graph, history: None, status: proj.status_info() };
+pub fn impact(ctx: &QueryCtx, symbols: &[String], file: Option<String>, depth: u32, max_chars: Option<usize>) -> Result<i32> {
+    let t0 = Instant::now();
+    let (proj, sync_stat) = open_for_query(ctx.base.clone(), ctx.sync)?;
+    let status = proj.status_info();
+    let gen = status.generation;
+    let env = ToolEnv { graph: &proj.graph, history: None, status };
     let mut parts: Vec<String> = Vec::with_capacity(symbols.len());
     let mut any_err = false;
-    for symbol in symbols {
+    let mut meta = cg_query::tools::ToolMeta::default();
+    let mut used = 0usize;
+    for (idx, symbol) in symbols.iter().enumerate() {
+        let sep = if idx > 0 { 7 } else { 0 };
+        let mut per_cap = max_chars;
+        if let Some(total_cap) = max_chars {
+            if idx > 0 {
+                let remaining = total_cap.saturating_sub(used + sep);
+                if remaining < 560 {
+                    parts.push(format!("> … +{} more symbol(s) omitted to fit `--max-chars {total_cap}`.", symbols.len() - idx));
+                    break;
+                }
+                per_cap = Some(remaining);
+            }
+        }
         let mut args = json!({"symbol": symbol, "depth": depth});
         if let Some(f) = &file {
             args["file"] = json!(f);
         }
+        if let Some(mc) = per_cap {
+            args["maxChars"] = json!(mc);
+        }
         let out = tools::call(&env, "impact", &args);
         any_err |= out.is_error;
+        meta.merge(&out.meta);
+        used += sep + out.text.len();
         parts.push(out.text);
     }
-    println!("{}", parts.join("\n\n---\n\n"));
+    let joined = parts.join("\n\n---\n\n");
+    println!("{joined}");
+    cg_query::telemetry::record(cg_query::telemetry::CallStats {
+        mode: "cli",
+        tool: "impact",
+        project: proj.root(),
+        duration_ms: t0.elapsed().as_secs_f64() * 1e3,
+        sync_checked: sync_stat.checked,
+        synced: sync_stat.synced,
+        sync_ms: sync_stat.sync_ms,
+        generation: gen,
+        output_bytes: joined.len(),
+        compact: false,
+        max_chars,
+        dedup_enabled: false,
+        meta,
+        is_error: any_err,
+    });
     Ok(if any_err { 1 } else { 0 })
 }
 
-pub fn implementations(ctx: &QueryCtx, symbols: &[String], depth: u32) -> Result<i32> {
-    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
-    let g = &proj.graph;
+pub fn implementations(ctx: &QueryCtx, symbols: &[String], file: Option<String>, depth: u32, max_chars: Option<usize>) -> Result<i32> {
+    let t0 = Instant::now();
+    let (proj, sync_stat) = open_for_query(ctx.base.clone(), ctx.sync)?;
+    let status = proj.status_info();
+    let gen = status.generation;
+    let env = ToolEnv { graph: &proj.graph, history: None, status };
+    let mut parts: Vec<String> = Vec::with_capacity(symbols.len());
+    let mut any_err = false;
+    let mut meta = cg_query::tools::ToolMeta::default();
+    let mut used = 0usize;
     for (idx, symbol) in symbols.iter().enumerate() {
-        if idx > 0 {
-            println!("\n---\n");
-        }
-        let nodes = g.resolve_symbol(symbol);
-        if nodes.is_empty() {
-            println!("Symbol \"{symbol}\" not found in the codebase");
-            continue;
-        }
-        for n in nodes {
-            let impls = g.implementations(n, depth);
-            println!("**Implementations of {} ({}:{}) — {} found**", g.qname(n), g.node_path(n), g.line(n), impls.len());
-            for i in &impls {
-                println!("- {} ({}) - {}:{}", g.name(*i), g.kind(*i), g.node_path(*i), g.line(*i));
+        let sep = if idx > 0 { 7 } else { 0 };
+        let mut per_cap = max_chars;
+        if let Some(total_cap) = max_chars {
+            if idx > 0 {
+                let remaining = total_cap.saturating_sub(used + sep);
+                if remaining < 560 {
+                    parts.push(format!("> … +{} more symbol(s) omitted to fit `--max-chars {total_cap}`.", symbols.len() - idx));
+                    break;
+                }
+                per_cap = Some(remaining);
             }
         }
+        let mut args = json!({"symbol": symbol, "depth": depth});
+        if let Some(f) = &file {
+            args["file"] = json!(f);
+        }
+        if let Some(mc) = per_cap {
+            args["maxChars"] = json!(mc);
+        }
+        let out = tools::call(&env, "implementations", &args);
+        any_err |= out.is_error;
+        meta.merge(&out.meta);
+        used += sep + out.text.len();
+        parts.push(out.text);
     }
-    Ok(0)
+    let joined = parts.join("\n\n---\n\n");
+    println!("{joined}");
+    cg_query::telemetry::record(cg_query::telemetry::CallStats {
+        mode: "cli",
+        tool: "implementations",
+        project: proj.root(),
+        duration_ms: t0.elapsed().as_secs_f64() * 1e3,
+        sync_checked: sync_stat.checked,
+        synced: sync_stat.synced,
+        sync_ms: sync_stat.sync_ms,
+        generation: gen,
+        output_bytes: joined.len(),
+        compact: false,
+        max_chars,
+        dedup_enabled: false,
+        meta,
+        is_error: any_err,
+    });
+    Ok(if any_err { 1 } else { 0 })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -424,7 +671,7 @@ pub fn affected(
             }
         }
     }
-    let proj = open_for_query(ctx.base.clone(), ctx.sync)?;
+    let (proj, _) = open_for_query(ctx.base.clone(), ctx.sync)?;
     let g = &proj.graph;
     let mut changed: Vec<FileId> = Vec::new();
     for f in &files {
@@ -463,7 +710,7 @@ pub fn affected(
 }
 
 pub fn cycles(path: Option<PathBuf>, sync: SyncMode, json_out: bool) -> Result<i32> {
-    let proj = open_for_query(path, sync)?;
+    let (proj, _) = open_for_query(path, sync)?;
     let g = &proj.graph;
     let fg = g.file_graph();
     let cycles = g.import_cycles(&fg);
@@ -576,18 +823,45 @@ pub fn debug_diff(path: Option<PathBuf>, limit: usize) -> Result<i32> {
 #[allow(dead_code)]
 fn unused(_: NodeIdx) {}
 
-pub fn serve(base: Option<PathBuf>, http: Option<String>, token: Option<String>, no_watch: bool) -> Result<i32> {
+fn env_truthy(name: &str, fallback: Option<&str>) -> bool {
+    brand::env::get(name, fallback).is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+fn env_falsy(name: &str) -> bool {
+    brand::env::get(name, None).is_some_and(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+}
+
+pub fn serve(base: Option<PathBuf>, http: Option<String>, token: Option<String>, no_watch: bool, dedup_flag: bool, no_auto_sync: bool) -> Result<i32> {
     // stdout belongs to the protocol: all logging goes to stderr
     let filter = std::env::var(brand::env::LOG).unwrap_or_else(|_| "warn".into());
     let _ = tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(tracing_subscriber::EnvFilter::new(filter)).try_init();
-    let dedup = brand::env::get("CGR_EXPLORE_DEDUP", Some("CODEGRAPH_EXPLORE_DEDUP")).is_some_and(|v| v == "1");
+    let mut dedup = dedup_flag || env_truthy(brand::env::DEDUP, None) || env_truthy(brand::env::EXPLORE_DEDUP, Some(brand::env::EXPLORE_DEDUP_UPSTREAM));
+    if http.is_some() && dedup {
+        eprintln!("warning: session deduplication (--dedup) is disabled over --http because multiple clients share one server instance");
+        dedup = false;
+    }
+    let auto_sync = !no_auto_sync && !env_falsy(brand::env::AUTO_SYNC);
     let cfg_path = base.map(|p| p.canonicalize().unwrap_or(p));
-    let cfg = cg_mcp::Config { path: cfg_path.clone(), tools: cg_mcp::defs::allowlist_from_env(), dedup };
+    let cfg = cg_mcp::Config { path: cfg_path.clone(), tools: cg_mcp::defs::allowlist_from_env(), dedup, auto_sync };
     let server = cg_mcp::Server::new(cfg);
     server.set_rebuild_hook(std::sync::Arc::new(|root: &Path| {
         let _ = cg_resolve::index_project(root, &cg_resolve::IndexOptions { low_priority: true, ..Default::default() });
     }));
     server.set_status_hook(std::sync::Arc::new(|p: &Project| cg_sync::measure_changes(p.root(), &p.snap.view).ok().map(|c| c.describe())));
+    server.set_sync_hook(std::sync::Arc::new(|root: &Path, explicit: bool| {
+        let t = Instant::now();
+        let timeout = if explicit { Duration::from_secs(5) } else { Duration::from_millis(250) };
+        let opts = cg_sync::SyncOptions { lock_timeout: Some(timeout), ..Default::default() };
+        match cg_sync::sync(root, &opts) {
+            Ok(rep) => cg_mcp::SyncHookResult { synced: !rep.up_to_date, sync_ms: t.elapsed().as_secs_f64() * 1e3, skipped: false },
+            Err(e) => {
+                if explicit {
+                    tracing::warn!("explicit MCP sync skipped for {}: {e}", root.display());
+                }
+                cg_mcp::SyncHookResult { synced: false, sync_ms: t.elapsed().as_secs_f64() * 1e3, skipped: true }
+            }
+        }
+    }));
     let watchers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, cg_sync::WatchHandle>>> = Default::default();
     if !no_watch {
         let w = watchers.clone();

@@ -7,5 +7,5 @@ pub mod server;
 pub mod stdio;
 
 pub use http::{serve_http, HttpConfig};
-pub use server::{Config, Reply, Server};
+pub use server::{Config, Reply, Server, SyncHookResult};
 pub use stdio::serve_stdio;

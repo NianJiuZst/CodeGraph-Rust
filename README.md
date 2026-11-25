@@ -520,15 +520,16 @@ By default, the tool list exposes **`codegraph-rust_explore`**. Set `CGR_MCP_TOO
 environment to enable additional tools:
 
 ```sh
-CGR_MCP_TOOLS=explore,node,callers,callees,impact,files,search,status cgr serve --mcp
+CGR_MCP_TOOLS=explore,node,callers,callees,impact,implementations,files,search,status cgr serve --mcp --dedup
 ```
 
 | Tool | Purpose |
 |---|---|
-| `codegraph-rust_explore` | Relevant source, named-symbol flows and impact |
-| `codegraph-rust_node` | Symbol or file details and source |
-| `codegraph-rust_callers` / `codegraph-rust_callees` | Call relationships |
-| `codegraph-rust_impact` | Change impact neighborhood |
+| `codegraph-rust_explore` | Relevant source, named-symbol flows, compact outlines and impact |
+| `codegraph-rust_node` | Symbol or file details, source, `compact` / `maxChars` budgeting, and `tail_idx` hints |
+| `codegraph-rust_callers` / `codegraph-rust_callees` | Call relationships with `tail_idx` dynamic-dispatch hints and session dedup |
+| `codegraph-rust_impact` | Change impact neighborhood with `maxChars` budgeting and `tail_idx` hints |
+| `codegraph-rust_implementations` | Trait, interface, and subclass implementations |
 | `codegraph-rust_files` | Indexed file tree |
 | `codegraph-rust_search` | Symbol locations |
 | `codegraph-rust_status` | Index health and pending changes |
@@ -603,9 +604,10 @@ flags for downstream ranking and analysis.
 | `CGR_THREADS` | Indexing worker count; the detected memory budget can reduce it |
 | `CGR_MEMORY_MB` | Tuning budget for workers, batches, kernel spill and resolver caches; not an RSS cap |
 | `CGR_MCP_TOOLS` | Comma-separated list of exposed MCP tools; `CODEGRAPH_MCP_TOOLS` is a fallback |
-| `CGR_EXPLORE_DEDUP=1` | Skip source already returned in the same durable MCP conversation |
-| `CGR_SESSION` | Session ID for persistent cross-call CLI `explore` deduplication (`.cgr/sessions/`) |
-| `CGR_AUTO_SYNC=1` | Incrementally sync stale index changes before CLI queries (overridable via `--no-sync`) |
+| `CGR_DEDUP=1` / `CGR_EXPLORE_DEDUP=1` | Share session-level deduplication across `explore`, `node`, `callers`, and `callees` in MCP (also `--dedup`) |
+| `CGR_SESSION` | Session ID for persistent cross-call CLI deduplication across `explore`, `node`, `callers`, and `callees` (`.cgr/sessions/`) |
+| `CGR_AUTO_SYNC` | `1` enables pre-query incremental sync on CLI; `0` disables default pre-query sync in `cgr serve` |
+| `CGR_TELEMETRY_LOG` | Optional JSONL file path recording per-call latency, sync, dedup savings, and `tail_idx` counters (dormant when unset) |
 | `CGR_NO_PROMPT_HOOK=1` | Disable the optional Claude Code prompt hook at runtime |
 | `CGR_HTTP_TOKEN` | Require a bearer token on HTTP requests |
 | `CGR_LOG` | Service log filter, default `warn`; logs go to stderr |

@@ -37,6 +37,10 @@ pub mod env {
     pub const TIMINGS: &str = "CGR_TIMINGS";
     pub const AUTO_SYNC: &str = "CGR_AUTO_SYNC";
     pub const SESSION: &str = "CGR_SESSION";
+    pub const DEDUP: &str = "CGR_DEDUP";
+    pub const EXPLORE_DEDUP: &str = "CGR_EXPLORE_DEDUP";
+    pub const EXPLORE_DEDUP_UPSTREAM: &str = "CODEGRAPH_EXPLORE_DEDUP";
+    pub const TELEMETRY_LOG: &str = "CGR_TELEMETRY_LOG";
 
     /// `name` if set and non-empty, else `fallback`.
     pub fn get(name: &str, fallback: Option<&str>) -> Option<String> {

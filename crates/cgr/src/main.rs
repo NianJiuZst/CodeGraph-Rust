@@ -25,7 +25,7 @@ struct Cli {
     /// Skip automatic sync even when CGR_AUTO_SYNC=1 is set
     #[arg(long = "no-sync", global = true)]
     no_sync: bool,
-    /// Session ID for cross-call explore deduplication (also read from CGR_SESSION)
+    /// Session ID for cross-call session deduplication (also read from CGR_SESSION)
     #[arg(long = "session", global = true, value_name = "ID")]
     session: Option<String>,
     #[command(subcommand)]
@@ -81,6 +81,8 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         limit: usize,
         #[arg(long)]
+        max_chars: Option<usize>,
+        #[arg(long)]
         json: bool,
     },
     /// Explore: source, call paths and blast radius for a question or a bag of names
@@ -114,9 +116,15 @@ enum Cmd {
         limit: Option<usize>,
         #[arg(long)]
         symbols_only: bool,
-        /// File mode: hard character budget cap (1000–100000, default 38000)
+        /// Omit verbatim source bodies (signature + trail in symbol mode, symbol map in file mode)
+        #[arg(long)]
+        compact: bool,
+        /// Hard character budget cap (500–50000 symbol mode; 1000–100000 file mode)
         #[arg(long)]
         max_chars: Option<usize>,
+        /// Ignore session deduplication history for this call
+        #[arg(long)]
+        no_dedup: bool,
     },
     /// Indexed file tree
     Files {
@@ -135,6 +143,8 @@ enum Cmd {
         no_tests: bool,
         #[arg(long)]
         max_depth: Option<usize>,
+        #[arg(long)]
+        max_chars: Option<usize>,
     },
     /// Functions that call one or more symbols
     Callers {
@@ -144,6 +154,11 @@ enum Cmd {
         file: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        #[arg(long)]
+        max_chars: Option<usize>,
+        /// Ignore session deduplication history for this call
+        #[arg(long)]
+        no_dedup: bool,
     },
     /// Functions one or more symbols call
     Callees {
@@ -153,6 +168,11 @@ enum Cmd {
         file: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        #[arg(long)]
+        max_chars: Option<usize>,
+        /// Ignore session deduplication history for this call
+        #[arg(long)]
+        no_dedup: bool,
     },
     /// Symbols affected by changing one or more symbols
     Impact {
@@ -162,14 +182,20 @@ enum Cmd {
         file: Option<String>,
         #[arg(short, long, default_value_t = 2)]
         depth: u32,
+        #[arg(long)]
+        max_chars: Option<usize>,
     },
     /// Implementations / subtypes of one or more interfaces, abstract classes, or methods
     Implementations {
         #[arg(required = true, num_args = 1..)]
         symbols: Vec<String>,
+        #[arg(long)]
+        file: Option<String>,
         /// Maximum inheritance depth to traverse
         #[arg(short, long, default_value_t = 10)]
         depth: u32,
+        #[arg(long)]
+        max_chars: Option<usize>,
     },
     /// Test files affected by changes to the given files
     Affected {
@@ -210,6 +236,12 @@ enum Cmd {
         /// Do not watch files for changes
         #[arg(long)]
         no_watch: bool,
+        /// Enable session-level deduplication across explore/node/callers/callees (also CGR_DEDUP=1 or CGR_EXPLORE_DEDUP=1)
+        #[arg(long)]
+        dedup: bool,
+        /// Disable pre-query synchronous incremental sync (also CGR_AUTO_SYNC=0)
+        #[arg(long)]
+        no_auto_sync: bool,
     },
     /// Register the MCP server (and hook) with Claude Code, Cursor and Codex
     Install {
@@ -411,21 +443,21 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Index { path, force, quiet, timings, report_json } => cmds::index(path.or(base), force, quiet, timings, report_json),
         Cmd::Sync { path, quiet } => cmds::sync(path.or(base), quiet),
         Cmd::Status { path, json, strict, verify } => cmds::status(path.or(base), json, strict, verify),
-        Cmd::Query { search, kind, limit, json } => cmds::query(&qctx, &search, kind, limit, json),
+        Cmd::Query { search, kind, limit, max_chars, json } => cmds::query(&qctx, &search, kind, limit, max_chars, json),
         Cmd::Explore { query, max_files, max_chars, compact, no_dedup } => cmds::explore(&qctx, &query.join(" "), max_files, max_chars, compact, no_dedup),
-        Cmd::Node { targets, code, file, offset, limit, symbols_only, max_chars } => {
-            cmds::node(&qctx, &targets, cmds::NodeArgs { code, file, offset, limit, symbols_only, max_chars })
+        Cmd::Node { targets, code, file, offset, limit, symbols_only, compact, max_chars, no_dedup } => {
+            cmds::node(&qctx, &targets, cmds::NodeArgs { code, file, offset, limit, symbols_only, compact, max_chars, no_dedup })
         }
-        Cmd::Files { dir, pattern, format, no_metadata, tests, no_tests, max_depth } => {
-            cmds::files(&qctx, dir, pattern, &format, !no_metadata, tests, no_tests, max_depth)
+        Cmd::Files { dir, pattern, format, no_metadata, tests, no_tests, max_depth, max_chars } => {
+            cmds::files(&qctx, dir, pattern, &format, !no_metadata, tests, no_tests, max_depth, max_chars)
         }
-        Cmd::Callers { symbols, file, limit } => cmds::callers(&qctx, &symbols, file, limit, true),
-        Cmd::Callees { symbols, file, limit } => cmds::callers(&qctx, &symbols, file, limit, false),
-        Cmd::Impact { symbols, file, depth } => cmds::impact(&qctx, &symbols, file, depth),
-        Cmd::Implementations { symbols, depth } => cmds::implementations(&qctx, &symbols, depth),
+        Cmd::Callers { symbols, file, limit, max_chars, no_dedup } => cmds::callers(&qctx, &symbols, file, limit, max_chars, no_dedup, true),
+        Cmd::Callees { symbols, file, limit, max_chars, no_dedup } => cmds::callers(&qctx, &symbols, file, limit, max_chars, no_dedup, false),
+        Cmd::Impact { symbols, file, depth, max_chars } => cmds::impact(&qctx, &symbols, file, depth, max_chars),
+        Cmd::Implementations { symbols, file, depth, max_chars } => cmds::implementations(&qctx, &symbols, file, depth, max_chars),
         Cmd::Affected { files, stdin, depth, filter, cross_tier, json, quiet } => cmds::affected(&qctx, files, stdin, depth, filter, cross_tier, json, quiet),
         Cmd::Cycles { path, json } => cmds::cycles(path.or(base), sync, json),
-        Cmd::Serve { mcp: _, http, token, no_watch } => cmds::serve(base, http, token, no_watch),
+        Cmd::Serve { mcp: _, http, token, no_watch, dedup, no_auto_sync } => cmds::serve(base, http, token, no_watch, dedup, no_auto_sync),
         Cmd::Install { agents, local, no_hook, no_permissions, dry_run, bin } => {
             cmds::install(base, agents, local, !no_hook, !no_permissions, dry_run, bin, true)
         }

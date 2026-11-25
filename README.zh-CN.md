@@ -448,15 +448,16 @@ Claude Code 支持 `CLAUDE_CONFIG_DIR`，Codex 支持 `CODEX_HOME`。
 默认只公开 **`codegraph-rust_explore`**。在服务进程环境中设置 `CGR_MCP_TOOLS` 可启用其他工具：
 
 ```sh
-CGR_MCP_TOOLS=explore,node,callers,callees,impact,files,search,status cgr serve --mcp
+CGR_MCP_TOOLS=explore,node,callers,callees,impact,implementations,files,search,status cgr serve --mcp --dedup
 ```
 
 | 工具 | 用途 |
 |---|---|
-| `codegraph-rust_explore` | 相关源码、指定符号间的调用路径与影响范围 |
-| `codegraph-rust_node` | 符号或文件详情与源码 |
-| `codegraph-rust_callers` / `codegraph-rust_callees` | 调用关系 |
-| `codegraph-rust_impact` | 修改影响邻域 |
+| `codegraph-rust_explore` | 相关源码、指定符号间的调用路径、`compact` 大纲与影响范围 |
+| `codegraph-rust_node` | 符号或文件详情与源码，支持 `compact` / `maxChars` 预算与 `tail_idx` 提示 |
+| `codegraph-rust_callers` / `codegraph-rust_callees` | 调用关系，含 `tail_idx` 动态派发提示与会话去重 |
+| `codegraph-rust_impact` | 修改影响邻域，支持 `maxChars` 预算与 `tail_idx` 提示 |
+| `codegraph-rust_implementations` | Trait、接口与子类实现 |
 | `codegraph-rust_files` | 已索引文件树 |
 | `codegraph-rust_search` | 符号位置 |
 | `codegraph-rust_status` | 索引状态与待同步变更 |
@@ -526,9 +527,10 @@ cp skills/codegraph-rust/SKILL.md ~/.gemini/config/skills/codegraph-rust/SKILL.m
 | `CGR_THREADS` | 索引工作线程数，检测到的内存预算可能降低实际数量 |
 | `CGR_MEMORY_MB` | 用于线程、批次、kernel 临时映射和解析缓存的调优预算，不是 RSS 硬上限 |
 | `CGR_MCP_TOOLS` | 逗号分隔的 MCP 工具列表，兼容回退到 `CODEGRAPH_MCP_TOOLS` |
-| `CGR_EXPLORE_DEDUP=1` | 在同一个持久 MCP 对话中跳过已返回源码 |
-| `CGR_SESSION` | CLI 跨调用 `explore` 去重会话 ID（保存在 `.cgr/sessions/`） |
-| `CGR_AUTO_SYNC=1` | CLI 查询前自动增量同步过期索引（可用 `--no-sync` 覆盖） |
+| `CGR_DEDUP=1` / `CGR_EXPLORE_DEDUP=1` | 在 MCP 会话中启用跨 `explore`/`node`/`callers`/`callees` 去重（也可用 `--dedup`） |
+| `CGR_SESSION` | CLI 跨 `explore`/`node`/`callers`/`callees` 会话去重 ID（保存在 `.cgr/sessions/`） |
+| `CGR_AUTO_SYNC` | `1` 开启 CLI 查询前自动增量同步；`0` 关闭 `cgr serve` 默认查询前同步 |
+| `CGR_TELEMETRY_LOG` | 可选 JSONL 遥测日志路径，记录每次查询耗时、同步、去重节省字节与 `tail_idx` 触发统计（未设置时零开销） |
 | `CGR_NO_PROMPT_HOOK=1` | 运行时禁用可选的 Claude Code 提示钩子 |
 | `CGR_HTTP_TOKEN` | 要求 HTTP 请求使用 Bearer Token |
 | `CGR_LOG` | 服务日志过滤条件，默认 `warn`，写入 stderr |

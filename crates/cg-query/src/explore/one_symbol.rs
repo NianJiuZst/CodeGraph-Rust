@@ -486,7 +486,7 @@ pub fn try_explore_one_symbol(g: &Graph, query: &str, max_chars: usize, opts: &E
     let mut body_chars = (max_chars / 2).min(8_000).max(max_chars.min(600));
     for attempt in 0..=4 {
         let cfg = ComposeCfg { caps, body_chars, compact: opts.compact, history: history.as_deref() };
-        let (mut text, files, sent_now) = compose(g, &name, &collected, &sources, &cfg);
+        let (mut text, files, sent_now, meta) = compose(g, &name, &collected, &sources, &cfg);
         if text.len() <= max_chars || attempt == 4 {
             let mut truncated = false;
             if text.len() > max_chars {
@@ -504,7 +504,7 @@ pub fn try_explore_one_symbol(g: &Graph, query: &str, max_chars: usize, opts: &E
                     h.record(sent_now);
                 }
             }
-            return Some(ExploreResult { text, files, symbols: defs.len(), found_named: true });
+            return Some(ExploreResult { text, files, symbols: defs.len(), found_named: true, meta });
         }
         caps = caps.halve();
         body_chars = (body_chars * 7) / 10;
@@ -525,10 +525,11 @@ fn compose(
     collected: &[(NodeIdx, Vec<Site>)],
     sources: &FxHashMap<FileId, SourceView>,
     cfg: &ComposeCfg<'_>,
-) -> (String, Vec<String>, BTreeMap<String, SentFile>) {
+) -> (String, Vec<String>, BTreeMap<String, SentFile>, crate::tools::ToolMeta) {
     let mut out = String::new();
     let mut file_set: FxHashSet<FileId> = FxHashSet::default();
     let mut sent_now: BTreeMap<String, SentFile> = BTreeMap::new();
+    let mut meta = crate::tools::ToolMeta::default();
     let per_def_body = (cfg.body_chars / collected.len().max(1)).max(600);
     let per_def_caps = if collected.len() == 1 { cfg.caps } else { cfg.caps.halve() };
 
@@ -584,12 +585,15 @@ fn compose(
             let _ = writeln!(out, "> Compact mode omits source bodies. Drop `compact` or call `node` for verbatim code.\n");
         } else if let Some(sv) = sources.get(&def_file) {
             let (body, shown_to, cut) = render_body(sv, start, end, per_def_body);
+            let fenced_len = body.len() + lang.len() + 8;
             let fp = g.fingerprint(def_file);
-            if cfg.history.is_some_and(|h| h.is_covered(def_path, fp, start, shown_to)) {
-                let _ = writeln!(
-                    out,
-                    "> Already sent earlier in this conversation: lines {start}-{shown_to} of `{def_path}` (unchanged) — use that copy; don't re-fetch it and don't Read the file.\n"
-                );
+            let covered = cfg.history.is_some_and(|h| h.is_covered(def_path, fp, start, shown_to));
+            if let Some((notice, saved)) =
+                covered.then(|| crate::explore::dedup_notice(&format!("lines {start}-{shown_to} of `{def_path}`"), fenced_len, "use that copy.")).flatten()
+            {
+                meta.dedup_hits += 1;
+                meta.dedup_saved_bytes += saved;
+                let _ = writeln!(out, "{notice}\n");
             } else {
                 let _ = writeln!(out, "```{lang}\n{body}\n```");
                 if cut {
@@ -600,13 +604,16 @@ fn compose(
                     );
                 }
                 out.push('\n');
-                let entry = sent_now.entry(def_path.to_owned()).or_insert_with(|| SentFile { fingerprint: fp, ranges: Vec::new() });
-                entry.ranges.push((start, shown_to));
+                if !covered {
+                    let entry = sent_now.entry(def_path.to_owned()).or_insert_with(|| SentFile { fingerprint: fp, ranges: Vec::new() });
+                    entry.ranges.push((start, shown_to));
+                }
             }
         }
 
         if prod_usage.is_empty() && tests.is_empty() {
             let unresolved = g.view.unresolved_refs_by_tail(g.name(*def), cg_store::UnresolvedScope::Dependency, 5);
+            meta.record_tail_idx(&unresolved);
             let hint = crate::tools::format_unresolved_hint(g, g.name(*def), "references", &unresolved);
             if !hint.is_empty() {
                 let _ = writeln!(out, "{hint}\n");
@@ -728,6 +735,7 @@ fn compose(
                 let _ = writeln!(out, "**Calls** {}{more}\n", shown.join(", "));
             } else {
                 let outgoing = g.view.unresolved_refs_from(*def, cg_store::UnresolvedScope::CallLike, 5);
+                meta.record_tail_idx(&outgoing);
                 let hint = crate::tools::format_unresolved_hint(g, g.name(*def), "callees", &outgoing);
                 if !hint.is_empty() {
                     let _ = writeln!(out, "{hint}\n");
@@ -738,5 +746,5 @@ fn compose(
 
     let mut files: Vec<String> = file_set.into_iter().map(|f| g.path(f).to_owned()).collect();
     files.sort();
-    (out.trim_end().to_owned(), files, sent_now)
+    (out.trim_end().to_owned(), files, sent_now, meta)
 }

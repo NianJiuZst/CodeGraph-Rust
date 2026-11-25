@@ -35,7 +35,7 @@ fn project() -> tempfile::TempDir {
 }
 
 fn server_for(root: &Path, tools: Option<Vec<String>>) -> (Arc<Server>, Arc<Collect>) {
-    let server = Server::new(Config { path: Some(root.to_path_buf()), tools, dedup: false });
+    let server = Server::new(Config { path: Some(root.to_path_buf()), tools, dedup: false, auto_sync: false });
     let out = Arc::new(Collect::default());
     server.set_outbound(out.clone());
     (server, out)
@@ -184,8 +184,28 @@ fn project_lru_evicts_the_corresponding_watcher_resource() {
 
 #[test]
 fn explore_compact_max_chars_and_session_dedup() {
-    let dir = project();
-    let server = Server::new(Config { path: Some(dir.path().to_path_buf()), tools: Some(vec!["explore".into(), "node".into()]), dedup: true });
+    let dir = tempfile::tempdir().unwrap();
+    let w = |rel: &str, text: &str| {
+        let p = dir.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    w(
+        "src/greet.ts",
+        "export function greet(name: string): string {\n  const trimmed = name.trim();\n  const normalized = trimmed.length > 0 ? trimmed : 'world';\n  return format(normalized);\n}\nexport function format(name: string): string {\n  return `hello ${name}`;\n}\nexport function tiny(x: number): number { return x; }\n",
+    );
+    w(
+        "src/main.ts",
+        "import { greet, tiny } from './greet';\nexport function runAlpha(): string { return greet('alpha'); }\nexport function runBeta(): string { return greet('beta'); }\nexport function runGamma(): string { return greet('gamma'); }\nexport function runTiny(): number { return tiny(1); }\n",
+    );
+    cg_resolve::index_project(dir.path(), &Default::default()).unwrap();
+
+    let server = Server::new(Config {
+        path: Some(dir.path().to_path_buf()),
+        tools: Some(vec!["explore".into(), "node".into(), "callers".into(), "implementations".into()]),
+        dedup: true,
+        auto_sync: false,
+    });
     let out = Arc::new(Collect::default());
     server.set_outbound(out.clone());
 
@@ -194,8 +214,12 @@ fn explore_compact_max_chars_and_session_dedup() {
     let explore_schema = tools.as_array().unwrap().iter().find(|t| t["name"] == "codegraph-rust_explore").unwrap();
     assert!(explore_schema["inputSchema"]["properties"]["compact"].is_object());
     assert!(explore_schema["inputSchema"]["properties"]["maxChars"].is_object());
+    assert!(explore_schema["inputSchema"]["properties"]["noDedup"].is_object());
+    assert!(explore_schema["inputSchema"]["properties"]["sync"].is_object());
     let node_schema = tools.as_array().unwrap().iter().find(|t| t["name"] == "codegraph-rust_node").unwrap();
     assert!(node_schema["inputSchema"]["properties"]["maxChars"].is_object());
+    assert!(node_schema["inputSchema"]["properties"]["compact"].is_object());
+    assert!(node_schema["inputSchema"]["properties"]["noDedup"].is_object());
 
     // Compact mode omits source fences and must not poison dedup.
     call(&server, &out, 2, "codegraph-rust_explore", json!({"query": "greet", "compact": true}));
@@ -204,16 +228,52 @@ fn explore_compact_max_chars_and_session_dedup() {
     assert!(t2.contains("Compact mode omits source bodies"), "{t2}");
     assert!(!t2.contains("```ts"), "{t2}");
 
-    // First full call returns verbatim source; second deduplicates it.
+    // First full call returns verbatim source; second deduplicates it and is strictly shorter.
     call(&server, &out, 3, "codegraph-rust_explore", json!({"query": "greet"}));
     server.drain(Duration::from_secs(20));
     let t3 = text_of(&out.by_id(3).unwrap());
-    assert!(t3.contains("return format(name);"), "{t3}");
+    assert!(t3.contains("return format(normalized);"), "{t3}");
 
     call(&server, &out, 4, "codegraph-rust_explore", json!({"query": "greet"}));
     server.drain(Duration::from_secs(20));
     let t4 = text_of(&out.by_id(4).unwrap());
     assert!(t4.contains("Already sent earlier in this conversation"), "{t4}");
-    assert!(!t4.contains("return format(name);"), "{t4}");
+    assert!(t4.contains("saved "), "{t4}");
+    assert!(!t4.contains("return format(normalized);"), "{t4}");
+    assert!(t4.len() < t3.len(), "dedup must strictly shrink output ({} vs {})", t4.len(), t3.len());
+
+    // Cross-tool dedup: `node(symbol=greet, includeCode=true)` reuses explore's range cache.
+    call(&server, &out, 5, "codegraph-rust_node", json!({"symbol": "greet", "includeCode": true}));
+    server.drain(Duration::from_secs(20));
+    let t5 = text_of(&out.by_id(5).unwrap());
+    assert!(t5.contains("Already sent earlier in this conversation"), "{t5}");
+    assert!(!t5.contains("return format(normalized);"), "{t5}");
+    assert!(t5.contains("Called by"), "trail must stay intact: {t5}");
+
+    // `noDedup: true` forces verbatim source.
+    call(&server, &out, 6, "codegraph-rust_node", json!({"symbol": "greet", "includeCode": true, "noDedup": true}));
+    server.drain(Duration::from_secs(20));
+    let t6 = text_of(&out.by_id(6).unwrap());
+    assert!(t6.contains("return format(normalized);"), "{t6}");
+
+    // `callers` dedup shrinks multi-caller lists, but skips tiny single-caller results (no inflation).
+    call(&server, &out, 7, "codegraph-rust_callers", json!({"symbol": "greet"}));
+    server.drain(Duration::from_secs(20));
+    call(&server, &out, 8, "codegraph-rust_callers", json!({"symbol": "greet"}));
+    server.drain(Duration::from_secs(20));
+    let t7 = text_of(&out.by_id(7).unwrap());
+    let t8 = text_of(&out.by_id(8).unwrap());
+    assert!(t7.contains("runAlpha"), "{t7}");
+    assert!(t8.contains("Already sent earlier in this conversation"), "{t8}");
+    assert!(t8.len() < t7.len(), "callers dedup must strictly shrink output ({} vs {})", t8.len(), t7.len());
+
+    call(&server, &out, 9, "codegraph-rust_callers", json!({"symbol": "tiny"}));
+    server.drain(Duration::from_secs(20));
+    call(&server, &out, 10, "codegraph-rust_callers", json!({"symbol": "tiny"}));
+    server.drain(Duration::from_secs(20));
+    let t9 = text_of(&out.by_id(9).unwrap());
+    let t10 = text_of(&out.by_id(10).unwrap());
+    assert_eq!(t9, t10, "short callers output must not be inflated by a longer dedup notice");
+    assert!(!t10.contains("Already sent earlier"), "{t10}");
     server.shutdown();
 }

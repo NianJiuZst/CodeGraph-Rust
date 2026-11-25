@@ -43,21 +43,53 @@ pub fn budget_for(files: usize) -> Budget {
 
 const MAX_HISTORY_CALLS: usize = 32;
 
-/// Source ranges already given in this session (kept for the last 32 calls per project).
-/// Serializable so CLI sessions (`--session` / `CGR_SESSION`) can share the same dedup
-/// state across consecutive invocations as MCP sessions do in-process.
+/// Cached summary for a structural graph query (`callers` / `callees`) at a fixed index generation.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SentQuery {
+    pub(crate) tool: String,
+    pub(crate) key: String,
+    pub(crate) generation: u64,
+    pub(crate) summary: String,
+    pub(crate) bytes: usize,
+}
+
+/// Source ranges and structural query results already given in this session (kept for the last 32
+/// calls per project). Serializable so CLI sessions (`--session` / `CGR_SESSION`) share the same
+/// dedup state across consecutive invocations as MCP sessions do in-process.
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct History {
     #[serde(default)]
     calls: VecDeque<BTreeMap<String, SentFile>>,
+    #[serde(default)]
+    queries: VecDeque<SentQuery>,
     #[serde(skip)]
-    dirty: bool,
+    track_pending: bool,
+    #[serde(skip)]
+    pending_calls: VecDeque<BTreeMap<String, SentFile>>,
+    #[serde(skip)]
+    pending_queries: VecDeque<SentQuery>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SentFile {
     pub(crate) fingerprint: (u64, i64),
     pub(crate) ranges: Vec<(u32, u32)>,
+}
+
+/// Build a concise back-reference notice if and only if it is strictly shorter than
+/// re-sending `raw_bytes`. Returns `(notice_text, net_saved_bytes)`.
+pub(crate) fn dedup_notice(subject: &str, raw_bytes: usize, hint: &str) -> Option<(String, usize)> {
+    let draft = format!("> Already sent earlier in this conversation: {subject} (saved {raw_bytes} B) — {hint}");
+    if raw_bytes <= draft.len() {
+        return None;
+    }
+    let net = raw_bytes - draft.len();
+    let notice = format!("> Already sent earlier in this conversation: {subject} (saved {net} B) — {hint}");
+    let actual_saved = raw_bytes.saturating_sub(notice.len());
+    if actual_saved == 0 {
+        return None;
+    }
+    Some((notice, actual_saved))
 }
 
 impl History {
@@ -67,14 +99,16 @@ impl History {
 
     /// Load a persisted session history, returning an empty history if missing or unreadable.
     pub fn load(path: &Path) -> History {
-        let Ok(bytes) = std::fs::read(path) else {
-            return History::new();
-        };
-        let mut h: History = serde_json::from_slice(&bytes).unwrap_or_default();
+        let mut h: History = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         while h.calls.len() > MAX_HISTORY_CALLS {
             h.calls.pop_front();
         }
-        h.dirty = false;
+        while h.queries.len() > MAX_HISTORY_CALLS {
+            h.queries.pop_front();
+        }
+        h.track_pending = true;
+        h.pending_calls.clear();
+        h.pending_queries.clear();
         h
     }
 
@@ -89,15 +123,12 @@ impl History {
         std::fs::rename(&tmp, path)
     }
 
-    /// Merge this process's most recently recorded call into the latest on-disk session file
+    /// Merge every call/query recorded by this process into the latest on-disk session file
     /// under a per-session advisory lock so parallel CLI calls never overwrite each other.
     pub fn save_merged(&self, path: &Path) -> std::io::Result<()> {
-        if !self.dirty {
+        if self.pending_calls.is_empty() && self.pending_queries.is_empty() {
             return Ok(());
         }
-        let Some(latest_call) = self.calls.back().cloned() else {
-            return Ok(());
-        };
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -105,7 +136,13 @@ impl History {
         let lock = std::fs::OpenOptions::new().create(true).read(true).write(true).truncate(false).open(&lock_path)?;
         lock.lock()?;
         let mut disk = History::load(path);
-        disk.record(latest_call);
+        disk.track_pending = false;
+        for call in &self.pending_calls {
+            disk.record(call.clone());
+        }
+        for q in &self.pending_queries {
+            disk.record_query(q.clone());
+        }
         let res = disk.save(path);
         drop(lock);
         res
@@ -139,13 +176,43 @@ impl History {
     }
 
     pub(crate) fn record(&mut self, call: BTreeMap<String, SentFile>) {
-        // Advance the 32-call sliding window on every history-enabled explore call, including
-        // fully deduplicated calls, so old ranges expire after 32 turns.
+        // Advance the 32-call sliding window on every history-enabled call so old ranges expire.
+        if self.track_pending {
+            self.pending_calls.push_back(call.clone());
+            while self.pending_calls.len() > MAX_HISTORY_CALLS {
+                self.pending_calls.pop_front();
+            }
+        }
         self.calls.push_back(call);
         while self.calls.len() > MAX_HISTORY_CALLS {
             self.calls.pop_front();
         }
-        self.dirty = true;
+    }
+
+    pub(crate) fn record_ranges(&mut self, path: String, fp: (u64, i64), ranges: Vec<(u32, u32)>) {
+        if ranges.is_empty() {
+            return;
+        }
+        let mut call = BTreeMap::new();
+        call.insert(path, SentFile { fingerprint: fp, ranges });
+        self.record(call);
+    }
+
+    pub(crate) fn find_query(&self, tool: &str, key: &str, generation: u64) -> Option<&SentQuery> {
+        self.queries.iter().rev().find(|q| q.tool == tool && q.key == key && q.generation == generation)
+    }
+
+    pub(crate) fn record_query(&mut self, q: SentQuery) {
+        if self.track_pending {
+            self.pending_queries.push_back(q.clone());
+            while self.pending_queries.len() > MAX_HISTORY_CALLS {
+                self.pending_queries.pop_front();
+            }
+        }
+        self.queries.push_back(q);
+        while self.queries.len() > MAX_HISTORY_CALLS {
+            self.queries.pop_front();
+        }
     }
 }
 
@@ -167,6 +234,7 @@ pub struct ExploreResult {
     pub symbols: usize,
     /// The query named something that exists (exact symbol or file).
     pub found_named: bool,
+    pub meta: crate::tools::ToolMeta,
 }
 
 struct FileGroup {
@@ -212,6 +280,7 @@ impl Graph {
         let budget = budget_for(self.indexed_files());
         let hard = opts.max_output.unwrap_or_else(|| ((budget.max_chars as f64 * 1.5).round() as usize).min(25_000));
         let max_files = opts.max_files.map(|n| n.clamp(1, 20)).unwrap_or(budget.default_files);
+        let mut meta = crate::tools::ToolMeta::default();
 
         // 1. normalise
         let q = query.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -574,12 +643,21 @@ impl Graph {
                 if let Some(h) = history.as_mut() {
                     let covered = h.covered(&path, fp);
                     if !covered.is_empty() {
-                        let (done, fresh) = subtract_covered(ranges, &covered);
+                        let (done, fresh) = subtract_covered(ranges.clone(), &covered);
                         if !done.is_empty() {
+                            let mut omitted_bytes: usize =
+                                done.iter().flat_map(|&(s, e)| s..=e).filter_map(|l| lines.line(l).map(|txt| l.to_string().len() + 1 + txt.len() + 1)).sum();
+                            if fresh.is_empty() {
+                                omitted_bytes += lang.len() + 8;
+                            }
                             let spans: Vec<String> = done.iter().map(|(s, e)| format!("{s}-{e}")).collect();
-                            covered_note = format!("> Already sent earlier in this conversation: lines {} of `{path}` (unchanged) — use that copy; don't re-fetch it and don't Read the file.", spans.join(", "));
+                            if let Some((notice, saved)) = dedup_notice(&format!("lines {} of `{path}`", spans.join(", ")), omitted_bytes, "use that copy.") {
+                                meta.dedup_hits += 1;
+                                meta.dedup_saved_bytes += saved;
+                                covered_note = notice;
+                                ranges = fresh;
+                            }
                         }
-                        ranges = fresh;
                     }
                 }
             }
@@ -753,7 +831,7 @@ impl Graph {
             }
             h.record(sent_now);
         }
-        ExploreResult { text, files: shown_files, symbols: n_syms, found_named: !exact.is_empty() || !pinned.is_empty() }
+        ExploreResult { text, files: shown_files, symbols: n_syms, found_named: !exact.is_empty() || !pinned.is_empty(), meta }
     }
 
     /// Blast radius of the named symbols: who depends on them and which tests cover them.

@@ -57,7 +57,7 @@ call paths in one bounded response. Treat returned code windows as already read.
   ```
 - **Low-context triage & cross-call deduplication**:
   - Pass `--compact` to inspect call flow, blast radius, and symbol outlines without dumping full bodies, or `--max-chars 6000` to cap output size.
-  - Pass `--session <id>` (or set `CGR_SESSION=<id>`) across consecutive `cgr explore` calls in the same task so unchanged lines already sent earlier in the conversation are replaced with 1-line back-references (use `--no-dedup` to force full verbatim code).
+  - Pass `--session <id>` (or set `CGR_SESSION=<id>`) across consecutive `explore`, `node`, `callers`, and `callees` calls in the same task so unchanged code ranges and graph results already sent earlier in the conversation are replaced with 1-line back-references reporting bytes saved (use `--no-dedup` to force full verbatim output).
 
 ## 3. Targeted Graph Commands
 

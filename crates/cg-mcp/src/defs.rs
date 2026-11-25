@@ -5,7 +5,7 @@ use cg_core::brand;
 use cg_query::strings::brandify;
 use serde_json::{json, Value};
 
-pub const ALL_TOOLS: &[&str] = &["search", "callers", "callees", "impact", "node", "explore", "status", "files"];
+pub const ALL_TOOLS: &[&str] = &["search", "callers", "callees", "impact", "implementations", "node", "explore", "status", "files"];
 /// The default surface is `explore` alone, like upstream.
 pub const DEFAULT_TOOLS: &[&str] = &["explore"];
 
@@ -13,6 +13,28 @@ fn project_path_prop() -> Value {
     json!({
         "type": "string",
         "description": brandify("Absolute path to the project to query (or any directory inside it) — codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."),
+    })
+}
+
+fn sync_prop() -> Value {
+    json!({
+        "type": "boolean",
+        "description": "Incrementally refresh the index before answering (default: enabled in serve mode; set false to skip pre-query sync).",
+    })
+}
+
+fn no_dedup_prop() -> Value {
+    json!({
+        "type": "boolean",
+        "description": "Bypass session deduplication history for this call and return full verbatim output.",
+        "default": false,
+    })
+}
+
+fn max_chars_prop(desc: &str) -> Value {
+    json!({
+        "type": "number",
+        "description": desc,
     })
 }
 
@@ -49,6 +71,9 @@ pub fn definitions(allow: &Option<Vec<String>>) -> Vec<Value> {
 pub fn definition(short: &str) -> Value {
     let name = format!("{}{short}", brand::MCP_TOOL_PREFIX);
     let pp = project_path_prop();
+    let sync = sync_prop();
+    let no_dedup = no_dedup_prop();
+    let max_chars = max_chars_prop("Optional hard character budget cap (500–50000) to keep responses compact.");
     match short {
         "search" => json!({
             "name": name,
@@ -57,17 +82,22 @@ pub fn definition(short: &str) -> Value {
                 "query": {"type": "string", "description": "Symbol name or partial name (e.g., \"auth\", \"signIn\", \"UserService\")"},
                 "kind": {"type": "string", "description": "Filter by node kind", "enum": ["function", "method", "class", "interface", "type", "variable", "route", "component"]},
                 "limit": {"type": "number", "description": "Maximum results (default: 10)", "default": 10},
+                "maxChars": max_chars,
+                "sync": sync,
                 "projectPath": pp,
             }, "required": ["query"]},
             "annotations": read_only(),
         }),
         "callers" => json!({
             "name": name,
-            "description": brandify("List functions that call <symbol>. For the full flow, use codegraph_explore."),
+            "description": brandify("List functions that call <symbol>. Surfaces unresolved dynamic-dispatch hints via tail_idx when static callers are absent or sparse."),
             "inputSchema": {"type": "object", "properties": {
                 "symbol": {"type": "string", "description": "Name of the function, method, or class to find callers for"},
                 "file": {"type": "string", "description": "Narrow to the definition in this file (path or suffix) when several same-named symbols exist (e.g. one UserService per app in a monorepo)"},
                 "limit": {"type": "number", "description": "Maximum number of callers to return (default: 20)", "default": 20},
+                "maxChars": max_chars,
+                "noDedup": no_dedup,
+                "sync": sync,
                 "projectPath": pp,
             }, "required": ["symbol"]},
             "annotations": read_only(),
@@ -79,6 +109,9 @@ pub fn definition(short: &str) -> Value {
                 "symbol": {"type": "string", "description": "Name of the function, method, or class to find callees for"},
                 "file": {"type": "string", "description": "Narrow to the definition in this file (path or suffix) when several same-named symbols exist"},
                 "limit": {"type": "number", "description": "Maximum number of callees to return (default: 20)", "default": 20},
+                "maxChars": max_chars,
+                "noDedup": no_dedup,
+                "sync": sync,
                 "projectPath": pp,
             }, "required": ["symbol"]},
             "annotations": read_only(),
@@ -90,6 +123,21 @@ pub fn definition(short: &str) -> Value {
                 "symbol": {"type": "string", "description": "Name of the symbol to analyze impact for"},
                 "file": {"type": "string", "description": "Narrow to the definition in this file (path or suffix) when several same-named symbols exist"},
                 "depth": {"type": "number", "description": "How many levels of dependencies to traverse (default: 2)", "default": 2},
+                "maxChars": max_chars,
+                "sync": sync,
+                "projectPath": pp,
+            }, "required": ["symbol"]},
+            "annotations": read_only(),
+        }),
+        "implementations" => json!({
+            "name": name,
+            "description": "List implementations, subclasses, or trait/interface implementers of <symbol>.",
+            "inputSchema": {"type": "object", "properties": {
+                "symbol": {"type": "string", "description": "Name of the trait, interface, class, or method"},
+                "file": {"type": "string", "description": "Narrow to the definition in this file (path or suffix) when several same-named symbols exist"},
+                "depth": {"type": "number", "description": "Maximum inheritance depth (default: 10)", "default": 10},
+                "maxChars": max_chars,
+                "sync": sync,
                 "projectPath": pp,
             }, "required": ["symbol"]},
             "annotations": read_only(),
@@ -99,12 +147,15 @@ pub fn definition(short: &str) -> Value {
             "description": brandify("Two modes. (1) READ A FILE — use INSTEAD of the Read tool: pass `file` (a path or basename) with no `symbol` and it returns that file's current on-disk source with line numbers, exactly the shape Read gives you (`<n>\\t<line>`, safe to Edit from), narrowable with `offset`/`limit` just like Read — PLUS a one-line note of which files depend on it. Same bytes as Read, faster (served from the index), with the blast radius attached. Use it whenever you would Read a source file. (2) ONE SYMBOL you can name — its location, signature, verbatim source (includeCode=true) and caller/callee trail in one call, so before changing it you see what calls it and what your edit would break. For an AMBIGUOUS name it returns EVERY matching definition's body in one call (so you never Read a file to find the right overload); pass `file`/`line` to pin one. Use codegraph_explore for several related symbols or the full flow."),
             "inputSchema": {"type": "object", "properties": {
                 "symbol": {"type": "string", "description": "Name of the symbol to read (symbol mode). Omit it and pass `file` alone to read a whole file like Read."},
-                "includeCode": {"type": "boolean", "description": "Symbol mode: include the symbol's full body (default: false). Ignored in file mode, which always returns source unless `symbolsOnly` is set.", "default": false},
+                "includeCode": {"type": "boolean", "description": "Symbol mode: include the symbol's full body (default: false). Ignored in file mode, which always returns source unless `symbolsOnly` or `compact` is set.", "default": false},
                 "file": {"type": "string", "description": "A file path or basename (e.g. \"harness.rs\", \"src/auth/session.ts\"). Pass it ALONE (no symbol) to READ the file like the Read tool — its full source with line numbers + which files depend on it. Or pass it WITH a symbol to disambiguate an overloaded name to the definition in this file."},
                 "offset": {"type": "number", "description": "File mode: 1-based line to start reading from, exactly like Read's offset. Defaults to the start of the file."},
                 "limit": {"type": "number", "description": "File mode: maximum number of lines to return, exactly like Read's limit. Defaults to the whole file (capped at 2000 lines, like Read)."},
                 "symbolsOnly": {"type": "boolean", "description": "File mode: return just the file's symbol map + dependents (a cheap structural overview) instead of its source.", "default": false},
-                "maxChars": {"type": "number", "description": "File mode: optional character budget cap (1000–100000, default: 38000)."},
+                "compact": {"type": "boolean", "description": "Omit verbatim source bodies (returns signature + trail in symbol mode, or symbol map in file mode).", "default": false},
+                "maxChars": {"type": "number", "description": "Optional hard character budget cap (500–50000 in symbol mode; 1000–100000 in file mode, default: 38000)."},
+                "noDedup": no_dedup,
+                "sync": sync,
                 "line": {"type": "number", "description": "Symbol mode only: disambiguate to the definition at/around this line (use with the file:line a trail showed you)."},
                 "projectPath": pp,
             }, "required": []},
@@ -118,6 +169,8 @@ pub fn definition(short: &str) -> Value {
                 "maxFiles": {"type": "number", "description": "Maximum number of files to return source from, 1–20. Omit it to use a default sized to the project (4 files below 150 indexed files, 5 below 500, 8 otherwise). Total output is also capped by characters (about 13K–24K by project size), so a higher maxFiles spreads that budget over more files rather than returning more text."},
                 "maxChars": {"type": "number", "description": "Optional hard character budget cap (1000–50000) to tighten or widen response size."},
                 "compact": {"type": "boolean", "description": "Return call flow, blast radius, and symbol outlines without verbatim source bodies (low-context triage mode).", "default": false},
+                "noDedup": no_dedup,
+                "sync": sync,
                 "projectPath": pp,
             }, "required": ["query"]},
             "annotations": read_only(),
@@ -140,6 +193,8 @@ pub fn definition(short: &str) -> Value {
                 "testsOnly": {"type": "boolean", "description": "Only return test files (default: false)", "default": false},
                 "excludeTests": {"type": "boolean", "description": "Exclude test files (default: false)", "default": false},
                 "maxDepth": {"type": "number", "description": "Maximum directory depth to show (default: unlimited)"},
+                "maxChars": max_chars,
+                "sync": sync,
                 "projectPath": pp,
             }},
             "annotations": read_only(),

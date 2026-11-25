@@ -7,6 +7,7 @@ pub mod project;
 pub mod search;
 pub mod source;
 pub mod strings;
+pub mod telemetry;
 pub mod tools;
 pub mod traverse;
 

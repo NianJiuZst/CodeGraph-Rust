@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.3.1 — 2026-11-25
+
+### Cross-tool session deduplication, `tail_idx` telemetry & guidance, and MCP/CLI parity (`ENGINE_VERSION = 15`)
+
+- **Cross-tool session deduplication (`cg-query`, `cg-mcp`, `cgr`)**:
+  - Extend `explore::History` to share unchanged file-range caches across `explore`, `node` (symbol `--code`/`includeCode` and file mode), and generation-keyed `callers` / `callees` results, emitting back-references only when net bytes are saved (`saved <N> B`) so short responses are never inflated.
+  - Persist all entries recorded across multi-target CLI invocations via lock-safe `History::save_merged`, avoid unbounded pending queues in long-running stdio MCP servers (and disable shared dedup on multi-client `--http`), enforce truncation-safe caching, and honor `noDedup` / `--no-dedup` uniformly across `explore`, `node`, `callers`, and `callees`.
+- **`tail_idx` coverage, actionable guidance, and opt-in telemetry (`cg-query`, `cg-mcp`, `cgr`)**:
+  - Surface `tail_idx` unresolved/ambiguous dynamic-dispatch hints on `node` (0 callers/callees), `implementations` (0 implementations), and low-caller (`1..=3`) `callers` / `impact` queries when dynamic or ambiguous sites exist, paired with actionable `rg` verification hints.
+  - Add zero-overhead opt-in JSONL telemetry (`CGR_TELEMETRY_LOG=<path>`) across both CLI and MCP paths recording `duration_ms`, `sync_checked`, `synced`, `sync_ms`, `generation`, `output_bytes`, `compact`, `max_chars`, `dedup_hits`, `dedup_saved_bytes`, and `tail_idx_*` trigger counters.
+- **Full MCP ↔ CLI budget & sync parity (`cg-mcp`, `cg-query`, `cgr`)**:
+  - Add synchronous pre-query incremental sync hook (`auto_sync`, enabled by default in `cgr serve`, overridable via `--no-auto-sync`, `CGR_AUTO_SYNC=0`, or per-call `sync: false`) so post-edit MCP queries reflect changes immediately without waiting for background watcher debounce.
+  - Expose `implementations` in `cg-mcp`, add `--dedup` / `CGR_DEDUP=1` to `cgr serve`, and support uniform `maxChars` (`--max-chars`), `compact` (`--compact`), `noDedup` (`--no-dedup`), and `sync` controls across MCP and CLI tools.
+
 ## 0.3.0 — 2026-11-23
 
 ### Context efficiency, minified-bundle skipping, transparent sync, and dynamic-dispatch hints (`ENGINE_VERSION = 15`)

@@ -35,11 +35,22 @@ pub struct Config {
     /// Short tool names enabled in addition to / instead of the default surface.
     pub tools: Option<Vec<String>>,
     pub dedup: bool,
+    /// Run the registered pre-query incremental sync hook before answering queries so edits
+    /// are immediately reflected without waiting for background watcher debounce.
+    pub auto_sync: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SyncHookResult {
+    pub synced: bool,
+    pub sync_ms: f64,
+    pub skipped: bool,
 }
 
 type StatusHook = Arc<dyn Fn(&Project) -> Option<String> + Send + Sync>;
 type RebuildHook = Arc<dyn Fn(&Path) + Send + Sync>;
 type OpenHook = Arc<dyn Fn(&Path) + Send + Sync>;
+type SyncHook = Arc<dyn Fn(&Path, bool) -> SyncHookResult + Send + Sync>;
 
 struct Entry {
     project: Arc<Project>,
@@ -84,6 +95,7 @@ pub struct Server {
     rebuilding: Arc<Mutex<Option<PathBuf>>>,
     open_hook: Mutex<Option<OpenHook>>,
     close_hook: Mutex<Option<OpenHook>>,
+    sync_hook: Mutex<Option<SyncHook>>,
     next_req: AtomicU64,
     /// Tool calls that were accepted and have not been answered yet (see [`Server::drain`]).
     inflight: (Mutex<usize>, Condvar),
@@ -173,6 +185,7 @@ impl Server {
             rebuilding: Arc::new(Mutex::new(None)),
             open_hook: Mutex::new(None),
             close_hook: Mutex::new(None),
+            sync_hook: Mutex::new(None),
             next_req: AtomicU64::new(1),
             started: Instant::now(),
         })
@@ -198,6 +211,11 @@ impl Server {
     /// Release per-project resources when its cached snapshot is evicted.
     pub fn set_close_hook(&self, h: OpenHook) {
         *self.close_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
+    }
+
+    /// Optional fast incremental sync hook run before queries when `auto_sync` or `sync: true` is active.
+    pub fn set_sync_hook(&self, h: SyncHook) {
+        *self.sync_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
     }
 
     /// Open the project at `start` ahead of the first tool call (so it is watched from the start).
@@ -415,22 +433,60 @@ impl Server {
     }
 
     fn run_tool(&self, name: &str, args: &Value) -> ToolOutput {
+        let t0 = Instant::now();
         let short = name.strip_prefix(brand::MCP_TOOL_PREFIX).or_else(|| name.strip_prefix("codegraph_")).unwrap_or(name);
         if !defs::ALL_TOOLS.contains(&short) || !defs::is_enabled(short, &self.cfg.tools) {
             return ToolOutput::err(format!("Unknown tool: {name}"));
         }
-        let (project, history, noticed) = match self.project_for(args.get("projectPath").and_then(|v| v.as_str())) {
+        let project_path = args.get("projectPath").and_then(|v| v.as_str());
+        let explicit_sync = args.get("sync").and_then(|v| v.as_bool());
+        let want_sync = match explicit_sync {
+            Some(explicit) => explicit,
+            None => self.cfg.auto_sync && short != "status",
+        };
+        let is_explicit_sync = explicit_sync == Some(true);
+        let mut sync_checked = false;
+        let mut sync_res = SyncHookResult::default();
+        if want_sync {
+            // Drop the mutex guard before running disk I/O so concurrent projects do not serialize here.
+            let hook = self.sync_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(hook) = hook {
+                let default = self.default_root();
+                let start = match project_path.map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(p) => {
+                        let pb = PathBuf::from(p);
+                        if pb.is_absolute() {
+                            pb
+                        } else {
+                            default.join(pb)
+                        }
+                    }
+                    None => default,
+                };
+                if let Some(store) = Store::locate(&start) {
+                    sync_checked = true;
+                    sync_res = hook(&store.root, is_explicit_sync);
+                }
+            }
+        }
+        let (project, history, noticed) = match self.project_for(project_path) {
             Ok(x) => x,
             Err(o) => return o,
         };
         let mut status: StatusInfo = project.status_info();
         if short == "status" {
-            if let Some(h) = self.status_hook.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            let hook = self.status_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(h) = hook {
                 status.changes = h(&project);
             }
         }
+        let gen = status.generation;
+        let dedup_enabled = self.cfg.dedup && !args.get("noDedup").and_then(|v| v.as_bool()).unwrap_or(false);
         let env = ToolEnv { graph: &project.graph, history: if self.cfg.dedup { Some(history) } else { None }, status };
         let mut out = tools::call(&env, short, args);
+        if is_explicit_sync && sync_res.skipped && !out.is_error {
+            out.text = format!("> Note: explicit `sync: true` could not acquire the index lock in time; answering from the existing snapshot.\n\n{}", out.text);
+        }
         if !out.is_error && project.snap.manifest.engine_version != brand::ENGINE_VERSION && !noticed.swap(true, Ordering::SeqCst) {
             out.text = format!(
                 "> Note: this index was built by an older {} engine. It still answers; `{} index` rebuilds it with the current resolver.\n\n{}",
@@ -439,6 +495,22 @@ impl Server {
                 out.text
             );
         }
+        cg_query::telemetry::record(cg_query::telemetry::CallStats {
+            mode: "mcp",
+            tool: short,
+            project: project.root(),
+            duration_ms: t0.elapsed().as_secs_f64() * 1e3,
+            sync_checked,
+            synced: sync_res.synced,
+            sync_ms: sync_res.sync_ms,
+            generation: gen,
+            output_bytes: out.text.len(),
+            compact: args.get("compact").and_then(|v| v.as_bool()).unwrap_or(false) || args.get("symbolsOnly").and_then(|v| v.as_bool()).unwrap_or(false),
+            max_chars: args.get("maxChars").and_then(|v| v.as_u64()).map(|n| n as usize),
+            dedup_enabled,
+            meta: out.meta.clone(),
+            is_error: out.is_error,
+        });
         out
     }
 
