@@ -165,7 +165,7 @@ fn event_paths(root: &Path, view: &View, paths: Option<&[PathBuf]>) -> Option<Ve
             return None;
         }
         let rel = p.to_str()?.replace('\\', "/");
-        if rel.is_empty() || crate::watch::is_config_name(rel.rsplit('/').next()?) || root.join(&p).is_dir() {
+        if rel.is_empty() || crate::watch::is_config_name(rel.rsplit('/').next()?) || crate::watch::is_git_inventory_path(&p) || root.join(&p).is_dir() {
             return None;
         }
         // A removed directory is no longer identifiable with stat.
@@ -198,7 +198,7 @@ fn scan_events(root: &Path, config: &ProjectConfig, view: &View, paths: &[String
             None => {
                 // A tracked-but-ignored file can be included by the full scanner's git
                 // supplement; use that scanner rather than silently dropping the file.
-                if entries.contains_key(rel) && root.join(rel).is_file() && rules.is_ignored(rel, false) {
+                if root.join(rel).is_file() && rules.is_ignored(rel, false) && !rules.builtin_ignored(rel, false) {
                     return None;
                 }
                 entries.remove(rel);

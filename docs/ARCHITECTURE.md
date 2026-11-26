@@ -106,6 +106,9 @@ so another session takes over). A bounded queue feeds debounced paths to sync, a
 filesystem walk for normal events. Config/directory changes, rescan flags, errors or lost/burst
 events fall back to a full scan. Periodic scanning recovers missing events. The inventory is
 still assembled in memory and earlier delta files may be re-extracted against the same base.
+The event filter retains ignored sources already present in the published inventory;
+`.git/index` and `.git/info/exclude` events request a full scan so tracked-file membership and
+local ignore changes are visible. Built-in skips and explicit `exclude` patterns still apply.
 
 Kernel output buffers accumulated during extraction can spill to shared immutable temporary
 chunks, then be read through the same borrowed ABI views. Source text is not retained there.

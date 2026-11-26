@@ -89,20 +89,28 @@ pub(crate) fn is_config_name(name: &str) -> bool {
         || (name.starts_with("requirements") && name.ends_with(".txt"))
 }
 
+pub(crate) fn is_git_inventory_path(rel: &Path) -> bool {
+    rel == Path::new(".git/index") || rel == Path::new(".git/info/exclude")
+}
+
 struct Filter {
     root: PathBuf,
     rules: IgnoreRules,
+    indexed: Option<cg_store::Snapshot>,
 }
 
 impl Filter {
     fn new(root: &Path) -> Filter {
         let config = ProjectConfig::load(root);
-        Filter { root: root.to_path_buf(), rules: IgnoreRules::new(root, &config) }
+        Filter { root: root.to_path_buf(), rules: IgnoreRules::new(root, &config), indexed: Store::at(root).open_snapshot().ok() }
     }
 
     /// Does an event at `p` possibly change what the index says?
     fn relevant(&self, p: &Path) -> bool {
         let Ok(rel) = p.strip_prefix(&self.root) else { return false };
+        if is_git_inventory_path(rel) {
+            return true;
+        }
         let rel = rel.to_string_lossy().replace('\\', "/");
         if rel.is_empty() || rel == brand::DATA_DIR || rel.starts_with(&format!("{}/", brand::DATA_DIR)) || rel == ".git" || rel.starts_with(".git/") {
             return false;
@@ -112,7 +120,20 @@ impl Filter {
             return true;
         }
         let is_dir = p.is_dir();
-        !self.rules.is_ignored(&rel, is_dir)
+        if !self.rules.is_ignored(&rel, is_dir) {
+            return true;
+        }
+        if self.rules.builtin_ignored(&rel, is_dir) {
+            return false;
+        }
+        // The full scan revives tracked-but-ignored sources. Use its published
+        // inventory here, including deleted files and their removed directories.
+        let Some(indexed) = &self.indexed else { return false };
+        if indexed.view.file_by_path(&rel).is_some() {
+            return true;
+        }
+        let prefix = format!("{rel}/");
+        !p.is_file() && indexed.view.files().any(|f| indexed.view.file(f).path().starts_with(&prefix))
     }
 }
 
@@ -203,6 +224,9 @@ fn run_watch(root: &Path, opts: &SyncOptions, stop: &AtomicBool) {
                 }
                 if !matches!(ev.kind, EventKind::Access(_)) {
                     for p in ev.paths {
+                        if p.strip_prefix(root).is_ok_and(is_git_inventory_path) {
+                            full_scan = true;
+                        }
                         if p.file_name().and_then(|n| n.to_str()).is_some_and(is_config_name) {
                             filter = Filter::new(root);
                         }
@@ -236,20 +260,24 @@ fn run_watch(root: &Path, opts: &SyncOptions, stop: &AtomicBool) {
                 full_scan = false;
                 burst_started = None;
                 run_sync(root, &local);
+                filter = Filter::new(root);
                 last_scan = Instant::now();
             }
         } else if degraded && last_scan.elapsed() >= FALLBACK_SCAN.min(Duration::from_secs(5)) {
             run_sync(root, opts);
+            filter = Filter::new(root);
             last_scan = Instant::now();
         } else if last_scan.elapsed() >= FALLBACK_SCAN * 5 {
             // slow safety net: events can be dropped (inotify queue overflow, network drives)
             run_sync(root, opts);
+            filter = Filter::new(root);
             last_scan = Instant::now();
         }
         if dirty.is_empty() && !full_scan && last_event.elapsed() >= Duration::from_secs(30) && last_maintenance.elapsed() >= Duration::from_secs(30) {
             if let Ok(report) = crate::compact_if_due(root) {
                 if report.compacted {
                     tracing::info!("compacted idle snapshot");
+                    filter = Filter::new(root);
                 }
             }
             last_maintenance = Instant::now();
@@ -258,5 +286,40 @@ fn run_watch(root: &Path, opts: &SyncOptions, stop: &AtomicBool) {
         if store.read_manifest().ok().flatten().is_none() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cg_resolve::{index_project, IndexOptions};
+    use std::process::Command;
+
+    #[test]
+    fn filter_keeps_indexed_ignored_paths_and_their_removed_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("ignored")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/dep")).unwrap();
+        std::fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+        std::fs::write(root.join("cgr.json"), r#"{"exclude":["ignored/excluded.ts"]}"#).unwrap();
+        for rel in ["ignored/tracked.ts", "ignored/excluded.ts", "ignored/untracked.ts", "node_modules/dep/index.ts"] {
+            std::fs::write(root.join(rel), "export function run() {}\n").unwrap();
+        }
+        for args in [vec!["init", "--quiet"], vec!["add", "-f", "ignored/tracked.ts", "ignored/excluded.ts", "node_modules/dep/index.ts"]] {
+            let result = Command::new("git").arg("-C").arg(root).args(args).output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        }
+        index_project(root, &IndexOptions { threads: Some(2), ..Default::default() }).unwrap();
+        let filter = Filter::new(root);
+        assert!(filter.relevant(&root.join("ignored/tracked.ts")));
+        for rel in ["ignored/untracked.ts", "ignored/excluded.ts", "node_modules/dep/index.ts", ".git/objects/ab/object", ".cgr/manifest"] {
+            assert!(!filter.relevant(&root.join(rel)), "irrelevant: {rel}");
+        }
+        assert!(filter.relevant(&root.join(".git/index")), "Git inventory changes need a full scan");
+        assert!(filter.relevant(&root.join(".git/info/exclude")), "Git ignore changes need a full scan");
+        std::fs::remove_dir_all(root.join("ignored")).unwrap();
+        assert!(filter.relevant(&root.join("ignored/tracked.ts")), "deleted tracked source");
+        assert!(filter.relevant(&root.join("ignored")), "deleted ignored parent");
     }
 }
