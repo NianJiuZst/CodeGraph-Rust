@@ -43,34 +43,34 @@ cgr status --json
 ## 2. Primary Entry Point: `cgr explore`
 
 Run `cgr explore` **first** instead of multi-round `grep` + `read_file` loops.
-It returns verbatim line-numbered source windows (`<n>\t<line>`) plus cross-file
-call paths in one bounded response. Treat returned code windows as already read.
+Start with **`--compact --max-chars 6000 --max-files 6`** to get exact file
+paths, line numbers, symbol outlines, call paths, and blast radius in ~1–6 KB
+without dumping redundant raw file bodies into context (omit `--compact` only
+for a focused single-symbol lookup).
 
+- **Architecture, flow, or multi-symbol triage (recommended default — compact map first)**:
+  ```sh
+  cgr explore "AuthService loginUser SessionStore" --compact --max-chars 6000 --max-files 6
+  cgr explore "how does HTTP request reach database" --compact --max-chars 6000 --max-files 6
+  ```
 - **Single symbol** (focused mode — definition source + grouped prod/test callers + callees):
   ```sh
-  cgr explore "resolve_call"
+  cgr explore "resolve_call" --max-chars 8000
   ```
-- **Flow between symbols or architecture question**:
-  ```sh
-  cgr explore "AuthService loginUser SessionStore"
-  cgr explore "how does HTTP request reach database" --max-files 6
-  ```
-- **Low-context triage & cross-call deduplication**:
-  - Pass `--compact` to inspect call flow, blast radius, and symbol outlines without dumping full bodies, or `--max-chars 6000` to cap output size.
+- **Cross-call session deduplication**:
   - Pass `--session <id>` (or set `CGR_SESSION=<id>`) across consecutive `explore`, `node`, `callers`, and `callees` calls in the same task so unchanged code ranges and graph results already sent earlier in the conversation are replaced with 1-line back-references reporting bytes saved (use `--no-dedup` to force full verbatim output).
 
 ## 3. Targeted Graph Commands
 
 | Goal | Command |
 |---|---|
-| Read one or more symbols' source + caller/callee trail | `cgr node <sym1> [sym2 ...] --code [--file <path-or-suffix>]` |
-| Read a file + dependent files (use large blocks) | `cgr node <file-path> [--offset N --limit 300] [--max-chars N]` |
+| Read one or more symbols' source + caller/callee trail (bounded) | `cgr node <sym1> [sym2 ...] --code --max-chars 8000 [--file <path-or-suffix>]` |
 | Structural symbol map of a file (cheap overview) | `cgr node <file-path> --symbols-only` |
 | Incoming callers (supports multiple symbols + `fnRef`) | `cgr callers <sym1> [sym2 ...] [--file <path>] [--limit 20]` |
 | Outgoing callees (supports multiple symbols) | `cgr callees <sym1> [sym2 ...] [--file <path>] [--limit 20]` |
 | Refactor blast radius (supports multiple symbols) | `cgr impact <sym1> [sym2 ...] --depth 2 [--file <path>]` |
 | Trait / interface / subclass implementations | `cgr implementations <sym1> [sym2 ...] --depth 10` |
-| Tests impacted by modified files | `cgr affected <file1> <file2> [--cross-tier] --json` |
+| Tests impacted by modified files (narrow candidate list) | `cgr affected <file1> <file2> [--cross-tier] --json` |
 | Fast symbol search (locations only, no code) | `cgr query <text> [--kind function\|method\|class\|interface\|type\|component\|route] --json` |
 | Indexed file layout / package breakdown | `cgr files [--format tree\|flat\|grouped\|package] [--tests\|--no-tests]` |
 | Detect circular imports (exit 1 if cycles found) | `cgr cycles --json` |
@@ -78,32 +78,39 @@ call paths in one bounded response. Treat returned code windows as already read.
 Tip: When a symbol name is ambiguous across modules, pass `--file <path-or-suffix>`
 to `node`, `callers`, `callees`, or `impact`. When `callers`, `callees`, `impact`,
 or one-symbol `explore` finds 0 resolved edges, check any appended
-`unresolved / ambiguous references` note for dynamic-dispatch candidate sites
-(and check `cgr status --json`'s `refs.resolvedRate` to gauge static coverage in dynamic repos).
+`unresolved / ambiguous references` (`tail_idx`) note for dynamic-dispatch
+candidate sites and follow up with targeted `rg` (check `cgr status --json`'s
+`refs.resolvedRate` to gauge static coverage in dynamic repos).
 
 ## 4. Efficiency Rules & Pitfalls to Avoid
 
-- **Never micro-paginate files with `cgr node <file>`**: Do **not** read large
-  files in repeated 40–60 line `--offset --limit` slices. First lock onto the
-  relevant symbols with `explore` / `callers` / `impact` and read them via
-  `cgr node <symbol> --code`; when you need full-file or wide context (e.g.
-  test fixtures or editing a large module), read in large contiguous chunks
-  (250–500 lines via `read_file` or one wide `--limit` call) instead of many
-  tiny shell round-trips.
-- **Batch independent graph queries**: When you already know the symbols to
-  inspect, combine `callers`, `impact`, `implementations`, and `node <sym> --code`
-  into a single shell command (or parallel calls) to minimize LLM turns.
+- **Compact structural map first, targeted `read_file` for edits**: Use
+  `cgr explore "<query>" --compact --max-chars 6000 --max-files 6` to pinpoint
+  files, symbols, and line numbers first, then jump directly to targeted
+  `read_file(StartLine, EndLine)` only for the lines you need to inspect or edit.
+  This prevents double-reading raw file bodies across graph output and `read_file`.
+- **Always bound `cgr node --code` and never dump whole files**: Always pass
+  `--max-chars 8000` when calling `cgr node <s1> [s2 ...] --code`, and **never**
+  pass whole file paths to `cgr node <file> --code` (use `--symbols-only` for
+  file overviews or targeted `read_file` for large ranges). Do **not**
+  micro-paginate files in repeated 40–60 line `--offset --limit` slices.
+- **Batch multi-symbol queries & use inline `--sync`**: Combine related symbols
+  in a single call (`cgr callers s1 s2`, `cgr callees s1 s2`,
+  `cgr impact s1 s2 --depth 2`, `cgr implementations s1 s2`) instead of
+  one-symbol-per-turn loops. After edits, pass `--sync` directly on your next
+  query (`cgr --sync callers ...`) rather than spending an extra turn on `cgr sync`.
 - **Right tool for the query (`cgr` vs `rg`/`grep`)**: Use `cgr` for symbols,
-  call chains, implementations, blast radius, and affected tests. Use `rg` /
-  `grep` directly for non-symbol literals (protocol/command strings, error
-  messages, config keys, comments).
+  call chains, implementations, and blast radius. Follow up with targeted `rg`
+  when `cgr` reports `unresolved / ambiguous references` (`tail_idx`), and use
+  `rg` / `grep` directly for non-symbol literals (protocol/command strings,
+  error messages, config keys, comments).
 - **Skip cold `cgr init` for trivial known-path tweaks**: If the exact file is
   already known and the edit is purely local (copy/config/single-file tweak),
   use `read_file` directly without paying cold-start turns.
-- **Fast iteration + full verification**: Use `cgr affected <files...> --json`
-  for fast targeted test loops while iterating, then finish cross-module
-  changes with the repo's typecheck/lint/full test suite (when practical) to
-  cover dynamic dispatch and macro expansions outside the static graph.
+- **Disciplined narrow verification**: Run the narrowest relevant test target
+  for the modified module first and finish once passing — do **not** blindly
+  execute the entire transitive test closure returned by `cgr affected` on
+  scoped fixes (reserve full-suite runs for broad cross-module refactors).
 
 ## 5. Verification & Troubleshooting
 

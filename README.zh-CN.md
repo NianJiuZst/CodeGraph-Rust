@@ -16,6 +16,21 @@ Node.js 运行时或数据库服务。原生索引保存在项目的 `.cgr/` 目
 存储、引用解析、增量同步、查询与服务集成由本 Rust workspace 实现。
 目前与上游的功能覆盖仍有差异，具体见[当前限制](#当前限制)。
 
+### 一键安装（预编译二进制 + Agent Skill）
+
+```sh
+# 1. 一键安装预编译 `cgr` 二进制（Linux / macOS，自动校验 SHA-256，无需 Rust 或 Node.js）
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh
+
+# 或一条命令同时安装二进制 + 官方 SKILL.md（自动识别 Claude Code / Codex / Antigravity / Cursor / OpenCode）
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh -s -- --skill
+
+# 仅安装或更新官方 SKILL.md
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install-skill.sh | sh
+```
+
+Windows（PowerShell 7+）：`irm https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.ps1 | iex`（`SKILL.md` 使用 `install-skill.ps1`）。指定目标 Agent 或从源码构建见[安装](#安装)。
+
 ## 目录
 
 - [核心能力](#核心能力)
@@ -203,6 +218,51 @@ MCP 增加排队上限、协作取消及项目/监听资源回收。
 
 ## 安装
 
+### 预编译一键安装（推荐）
+
+下载脚本会校验 [Releases 页面](https://github.com/NianJiuZst/CodeGraph-Rust/releases)上发布的预编译归档文件的 SHA-256（无需 Rust 工具链或 Node.js）：
+
+```sh
+# Linux / macOS — 仅安装二进制
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh
+
+# Linux / macOS — 一条命令同时安装二进制 + 官方 Agent Skill（SKILL.md）
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh -s -- --skill
+```
+
+```powershell
+# Windows，PowerShell 7+
+irm https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.ps1 | iex
+
+# Windows — 同时安装二进制 + 官方 Agent Skill（SKILL.md）
+$env:CGR_INSTALL_SKILL='1'; irm https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.ps1 | iex
+```
+
+发布流程为以下目标提供预编译包：
+
+| 平台 | 架构 | 打包方式 |
+|---|---|---|
+| Linux | x86_64、ARM64 | 静态 musl 可执行文件，`.tar.gz` |
+| macOS | Intel x86_64、Apple Silicon ARM64 | 可执行文件，`.tar.gz` |
+| Windows | x86_64、ARM64 | MSVC 可执行文件，`.zip` |
+
+下载脚本支持通过 `CGR_VERSION` 指定版本、通过 `CGR_INSTALL_DIR` 指定安装位置。
+默认目录为 Linux/macOS 的 `~/.local/bin`，以及 Windows 的 `%LOCALAPPDATA%\Programs\cgr`。
+
+### 一键安装 Agent Skill（`SKILL.md`）
+
+对于支持加载 `SKILL.md` 的 CLI 编码 Agent（Claude Code、Codex、Antigravity、Cursor、OpenCode），无需常驻 MCP 服务即可直接启用图谱：
+
+```sh
+# 自动检测本机已安装的 Agent（也可显式传参：--claude / --codex / --antigravity / --cursor / --opencode / --all / --dir <路径>）
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install-skill.sh | sh
+```
+
+```powershell
+# Windows，PowerShell 7+（可选：$env:CGR_SKILL_TARGETS='claude,codex,antigravity,cursor,opencode'）
+irm https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install-skill.ps1 | iex
+```
+
 ### 从源码构建并安装
 
 从源码构建需要 **Rust 1.89 或更新版本**、Cargo、Git，以及用于编译 Tree-sitter 语法的 C 编译工具链。
@@ -225,31 +285,6 @@ cargo build --release --locked -p cgr
 ```
 
 Windows 下的可执行文件为 `target\release\cgr.exe`。
-
-### Release 下载脚本
-
-下载脚本会校验 [Releases 页面](https://github.com/NianJiuZst/CodeGraph-Rust/releases)上发布的归档文件的 SHA-256。
-
-```sh
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh
-```
-
-```powershell
-# Windows，PowerShell 7+
-irm https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.ps1 | iex
-```
-
-发布流程定义了以下构建目标：
-
-| 平台 | 架构 | 打包方式 |
-|---|---|---|
-| Linux | x86_64、ARM64 | 静态 musl 可执行文件，`.tar.gz` |
-| macOS | Intel x86_64、Apple Silicon ARM64 | 可执行文件，`.tar.gz` |
-| Windows | x86_64、ARM64 | MSVC 可执行文件，`.zip` |
-
-下载脚本支持通过 `CGR_VERSION` 指定版本、通过 `CGR_INSTALL_DIR` 指定安装位置。
-默认目录为 Linux/macOS 的 `~/.local/bin`，以及 Windows 的 `%LOCALAPPDATA%\Programs\cgr`。
 
 ## 快速开始
 
@@ -476,15 +511,27 @@ cgr serve --http 127.0.0.1:7878 --path /absolute/path/to/project
 
 ### 作为 Agent Skill 使用（CLI 工作流）
 
-对于支持加载 `SKILL.md` 的编码 Agent（如 Antigravity、Claude Code、Codex），如果希望免常驻 MCP 服务直接通过 CLI 使用图谱，
-仓库内置了开箱即用的 [`skills/codegraph-rust/SKILL.md`](skills/codegraph-rust/SKILL.md)，涵盖索引检查与增量同步、`cgr explore` 探索、
-定向图谱命令以及经实测沉淀的防坑提效规则（如禁止碎片化分页读文件、批量合并独立图谱查询、符号图谱与 `rg` 字面量检索分工等）。
+对于支持加载 `SKILL.md` 的编码 Agent（Claude Code、Codex、Antigravity、Cursor、OpenCode），如果希望免常驻 MCP 服务直接通过 CLI 使用图谱，
+仓库内置了开箱即用的 [`skills/codegraph-rust/SKILL.md`](skills/codegraph-rust/SKILL.md)，涵盖紧凑结构图优先探索
+（`cgr explore --compact --max-chars 6000 --max-files 6`）、有界多符号源码读取（`cgr node --code --max-chars 8000`）、
+内联 `--sync`、`CGR_SESSION` 跨调用去重、`tail_idx` 动态回退以及克制化定向验证等实测提效规则。
 
 ```sh
-# 示例：全局安装到 Antigravity（需确保 `cgr` 在 PATH 中）
-mkdir -p ~/.gemini/config/skills/codegraph-rust
-cp skills/codegraph-rust/SKILL.md ~/.gemini/config/skills/codegraph-rust/SKILL.md
+# 一键安装（自动识别本机已安装的 Agent 目录，无需克隆仓库）
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install-skill.sh | sh
+
+# 或显式指定目标 Agent
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install-skill.sh | sh -s -- --claude --codex --antigravity
 ```
+
+| 参数 | 安装路径 |
+|---|---|
+| `--claude` | `${CLAUDE_CONFIG_DIR:-~/.claude}/skills/codegraph-rust/SKILL.md` |
+| `--codex` | `${CODEX_HOME:-~/.codex}/skills/codegraph-rust/SKILL.md` |
+| `--antigravity` | `${GEMINI_CONFIG_DIR:-~/.gemini/config}/skills/codegraph-rust/SKILL.md` |
+| `--cursor` | `~/.cursor/skills/codegraph-rust/SKILL.md` |
+| `--opencode` | `${XDG_CONFIG_HOME:-~/.config}/opencode/skills/codegraph-rust/SKILL.md` |
+| `--all` / `--dir <路径>` | 同时安装至上述全部 5 个 Agent，或安装到 `<路径>/codegraph-rust/SKILL.md` |
 
 ## 配置
 

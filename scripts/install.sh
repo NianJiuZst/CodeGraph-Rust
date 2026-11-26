@@ -2,17 +2,43 @@
 # Install the cgr binary from a GitHub release (Linux and macOS).
 #
 #   curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh -s -- --skill
 #
 # Environment:
-#   CGR_VERSION      version to install, e.g. 0.1.0 (default: the latest release)
-#   CGR_INSTALL_DIR  where the binary goes (default: $HOME/.local/bin)
-#   CGR_BASE_URL     release download base URL (default: the GitHub releases of this repository);
-#                    <base>/v<version>/cgr-<version>-<target>.tar.gz and its .sha256 must exist there
+#   CGR_VERSION        version to install, e.g. 0.3.1 (default: the latest release)
+#   CGR_INSTALL_DIR    where the binary goes (default: $HOME/.local/bin)
+#   CGR_INSTALL_SKILL  set to 1 to also install the official SKILL.md (same as --skill)
+#   CGR_BASE_URL       release download base URL (default: the GitHub releases of this repository);
+#                      <base>/v<version>/cgr-<version>-<target>.tar.gz and its .sha256 must exist there
 set -eu
 
 REPO="NianJiuZst/CodeGraph-Rust"
 BASE="${CGR_BASE_URL:-https://github.com/$REPO/releases/download}"
 DEST="${CGR_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_SKILL="${CGR_INSTALL_SKILL:-0}"
+SKILL_FLAGS=""
+SKILL_DIR=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --skill|--with-skill) INSTALL_SKILL=1 ;;
+    --claude|--claude-code|--codex|--antigravity|--gemini|--cursor|--opencode|--all)
+      INSTALL_SKILL=1
+      SKILL_FLAGS="$SKILL_FLAGS $1"
+      ;;
+    --skill-dir)
+      shift
+      [ $# -gt 0 ] || { printf 'install: --skill-dir requires a path\n' >&2; exit 1; }
+      INSTALL_SKILL=1
+      SKILL_DIR="$1"
+      ;;
+    *)
+      printf 'install: unknown option: %s\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'install: %s\n' "$*" >&2; exit 1; }
@@ -67,5 +93,26 @@ case ":$PATH:" in
   *":$DEST:"*) ;;
   *) say "note: $DEST is not on your PATH; add it, e.g.  export PATH=\"$DEST:\$PATH\"";;
 esac
+
+if [ "$INSTALL_SKILL" = "1" ]; then
+  skill_script="$tmp/install-skill.sh"
+  skill_script_url="${CGR_SKILL_SCRIPT_URL:-https://raw.githubusercontent.com/$REPO/main/scripts/install-skill.sh}"
+  if [ -n "${CGR_SKILL_SCRIPT_SOURCE:-}" ] && [ -f "$CGR_SKILL_SCRIPT_SOURCE" ]; then
+    cp "$CGR_SKILL_SCRIPT_SOURCE" "$skill_script"
+  else
+    fetch "$skill_script_url" "$skill_script" || die "failed to download $skill_script_url"
+  fi
+  if [ -n "$SKILL_DIR" ]; then
+    # shellcheck disable=SC2086
+    PATH="$DEST:$PATH" sh "$skill_script" $SKILL_FLAGS --dir "$SKILL_DIR"
+  else
+    # shellcheck disable=SC2086
+    PATH="$DEST:$PATH" sh "$skill_script" $SKILL_FLAGS
+  fi
+fi
+
 say "next:  cd your-project && cgr init      # build the index"
-say "       cgr install                      # register with Claude Code, Cursor and Codex"
+if [ "$INSTALL_SKILL" != "1" ]; then
+  say "       curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install-skill.sh | sh  # install SKILL.md"
+fi
+say "       cgr install                      # register MCP with Claude Code, Cursor and Codex"

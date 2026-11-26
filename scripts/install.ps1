@@ -44,8 +44,13 @@ try {
         [Environment]::SetEnvironmentVariable('Path', "$userPath;$dest", 'User')
         Write-Host "added $dest to your PATH (open a new terminal)"
     }
+    if ($env:CGR_INSTALL_SKILL -eq '1') {
+        $skillScriptUrl = if ($env:CGR_SKILL_SCRIPT_URL) { $env:CGR_SKILL_SCRIPT_URL } else { "https://raw.githubusercontent.com/$repo/main/scripts/install-skill.ps1" }
+        Invoke-Expression (Invoke-WebRequest -Uri $skillScriptUrl -UseBasicParsing).Content
+    }
     Write-Host 'next:  cd your-project; cgr init      # build the index'
-    Write-Host '       cgr install                    # register with Claude Code, Cursor and Codex'
+    Write-Host "       irm https://raw.githubusercontent.com/$repo/main/scripts/install-skill.ps1 | iex  # install SKILL.md"
+    Write-Host '       cgr install                    # register MCP with Claude Code, Cursor and Codex'
 }
 finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

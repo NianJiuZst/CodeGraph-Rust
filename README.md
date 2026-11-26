@@ -21,6 +21,21 @@ Tree-sitter extraction kernel and adapts the agent-facing tool schemas and guida
 queries and service integration are implemented in this Rust workspace. Current coverage
 differs from upstream; see [current limitations](#current-limitations).
 
+### Quick install (prebuilt binary + Agent Skill)
+
+```sh
+# 1. Install prebuilt `cgr` binary (Linux / macOS — verifies SHA-256)
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh
+
+# Or install binary + official SKILL.md together in one command (auto-detects Claude Code / Codex / Antigravity / Cursor / OpenCode)
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh -s -- --skill
+
+# Install or update only the official SKILL.md
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install-skill.sh | sh
+```
+
+Windows (PowerShell 7+): `irm https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.ps1 | iex` (and `install-skill.ps1` for `SKILL.md`). See [Installation](#installation) for target flags and building from source.
+
 ## Contents
 
 - [Capabilities](#capabilities)
@@ -233,6 +248,52 @@ in the bilingual [engineering record](docs/PERFORMANCE-IMPLEMENTATION.md).
 
 ## Installation
 
+### Prebuilt release installers (recommended)
+
+Download scripts verify SHA-256 checksums for the prebuilt archives on the
+[Releases page](https://github.com/NianJiuZst/CodeGraph-Rust/releases) (no Rust toolchain or Node.js required):
+
+```sh
+# Linux / macOS — binary only
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh
+
+# Linux / macOS — binary + official Agent Skill (SKILL.md) in one command
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh -s -- --skill
+```
+
+```powershell
+# Windows, PowerShell 7+
+irm https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.ps1 | iex
+
+# Windows — binary + official Agent Skill (SKILL.md)
+$env:CGR_INSTALL_SKILL='1'; irm https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.ps1 | iex
+```
+
+Release automation publishes prebuilt binaries for these targets:
+
+| Platform | Architectures | Packaging |
+|---|---|---|
+| Linux | x86_64, ARM64 | Static musl executable, `.tar.gz` |
+| macOS | Intel x86_64, Apple Silicon ARM64 | Executable, `.tar.gz` |
+| Windows | x86_64, ARM64 | MSVC executable, `.zip` |
+
+The scripts accept `CGR_VERSION` to pin a version and `CGR_INSTALL_DIR` to choose the install
+location. Defaults are `~/.local/bin` on Linux/macOS and `%LOCALAPPDATA%\Programs\cgr` on Windows.
+
+### One-line Agent Skill (`SKILL.md`) install
+
+For CLI-first coding agents that load `SKILL.md` playbooks (Claude Code, Codex, Antigravity, Cursor, OpenCode) without running a persistent MCP server:
+
+```sh
+# Auto-detect installed agents (or pass: --claude, --codex, --antigravity, --cursor, --opencode, --all, --dir <path>)
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install-skill.sh | sh
+```
+
+```powershell
+# Windows, PowerShell 7+ (optional: $env:CGR_SKILL_TARGETS='claude,codex,antigravity,cursor,opencode')
+irm https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install-skill.ps1 | iex
+```
+
 ### Build and install from source
 
 Building from source requires **Rust 1.89 or newer**,
@@ -257,32 +318,6 @@ cargo build --release --locked -p cgr
 ```
 
 On Windows, the executable is `target\release\cgr.exe`.
-
-### Release installers
-
-Download scripts verify SHA-256 checksums for the archives on the
-[Releases page](https://github.com/NianJiuZst/CodeGraph-Rust/releases).
-
-```sh
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh
-```
-
-```powershell
-# Windows, PowerShell 7+
-irm https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.ps1 | iex
-```
-
-Release automation defines these targets:
-
-| Platform | Architectures | Packaging |
-|---|---|---|
-| Linux | x86_64, ARM64 | Static musl executable, `.tar.gz` |
-| macOS | Intel x86_64, Apple Silicon ARM64 | Executable, `.tar.gz` |
-| Windows | x86_64, ARM64 | MSVC executable, `.zip` |
-
-The scripts accept `CGR_VERSION` to select a version and `CGR_INSTALL_DIR` to choose the install
-location. Defaults are `~/.local/bin` on Linux/macOS and `%LOCALAPPDATA%\Programs\cgr` on Windows.
 
 ## Quick start
 
@@ -549,17 +584,28 @@ appropriate for the clients that should access the project's source.
 
 ### Agent Skill (CLI workflow)
 
-For coding agents that load `SKILL.md` playbooks (such as Antigravity, Claude Code, or Codex)
+For coding agents that load `SKILL.md` playbooks (Claude Code, Codex, Antigravity, Cursor, OpenCode)
 without running a persistent MCP server, this repository ships a ready-to-use skill at
-[`skills/codegraph-rust/SKILL.md`](skills/codegraph-rust/SKILL.md) covering index sync, `cgr explore`,
-targeted graph commands, and token-saving anti-pitfall rules (e.g., avoiding micro-paginated file
-reads, batching independent graph queries, and pairing `cgr` with `rg` for non-symbol literals).
+[`skills/codegraph-rust/SKILL.md`](skills/codegraph-rust/SKILL.md) covering compact map-first exploration
+(`cgr explore --compact --max-chars 6000 --max-files 6`), bounded multi-symbol queries (`cgr node --code --max-chars 8000`),
+inline `--sync`, `CGR_SESSION` deduplication, `tail_idx` dynamic-dispatch fallback, and disciplined narrow verification.
 
 ```sh
-# Example: install globally for Antigravity (requires `cgr` on PATH)
-mkdir -p ~/.gemini/config/skills/codegraph-rust
-cp skills/codegraph-rust/SKILL.md ~/.gemini/config/skills/codegraph-rust/SKILL.md
+# One-line install (auto-detects installed agent directories; no repo clone needed)
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install-skill.sh | sh
+
+# Or target specific agents explicitly
+curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install-skill.sh | sh -s -- --claude --codex --antigravity
 ```
+
+| Flag | Destination |
+|---|---|
+| `--claude` | `${CLAUDE_CONFIG_DIR:-~/.claude}/skills/codegraph-rust/SKILL.md` |
+| `--codex` | `${CODEX_HOME:-~/.codex}/skills/codegraph-rust/SKILL.md` |
+| `--antigravity` | `${GEMINI_CONFIG_DIR:-~/.gemini/config}/skills/codegraph-rust/SKILL.md` |
+| `--cursor` | `~/.cursor/skills/codegraph-rust/SKILL.md` |
+| `--opencode` | `${XDG_CONFIG_HOME:-~/.config}/opencode/skills/codegraph-rust/SKILL.md` |
+| `--all` / `--dir <path>` | All 5 agents above, or `<path>/codegraph-rust/SKILL.md` |
 
 ## Configuration
 
