@@ -4672,33 +4672,97 @@ impl<'e, 'v> FileCx<'e, 'v> {
         }
     }
 
+    /// Tightest type declaration in `self.file` whose span encloses `line`.
+    fn enclosing_type_at(&self, line: u32) -> Option<NodeIdx> {
+        let view = self.view;
+        let mut best: Option<(u32, NodeIdx)> = None;
+        for raw in view.nodes_in_file(self.file) {
+            let n = NodeIdx(raw);
+            let h = view.hot(n);
+            let k = NodeKind::from_u8(h.kind).unwrap_or(NodeKind::Variable);
+            if !self.holds_members(k) || h.start_line > line || h.end_line < line {
+                continue;
+            }
+            let span = h.end_line.saturating_sub(h.start_line);
+            if best.is_none_or(|(s, prev)| (span, n) < (s, prev)) {
+                best = Some((span, n));
+            }
+        }
+        best.map(|(_, n)| n)
+    }
+
     /// Framework rule for a route's handler that no scope or import names: the method the
-    /// route decorates (`@Get() list()`, `@GetMapping get()`), declared right after the
-    /// decorator in the route's file. A bare method name is invisible to lexical lookup, but a
-    /// decorator route sits on the method it routes to.
+    /// route decorates (`@Get() list()`, `@GetMapping get()`, `[HttpGet] Get()`), declared
+    /// right after the decorator in the route's file, or a sibling member on the enclosing
+    /// type (`app.MapGet("/x", List)`).
     fn route_handler(&self, r: &RefRec, name: &str, kind: RefKind) -> Option<Outcome> {
         let view = self.view;
         if kind_of(view, r.from) != NodeKind::Route || !matches!(kind, RefKind::FunctionRef | RefKind::Edge(EdgeKind::Calls | EdgeKind::References)) {
             return None;
         }
-        let Shape::Bare(name) = parse_shape(name) else { return None };
+        let bare = match parse_shape(name) {
+            Shape::Bare(n) => Some(n),
+            Shape::This { fields, method, .. } if fields.is_empty() => Some(method),
+            _ => None,
+        }?;
+        let owner = self.enclosing_type_at(r.line);
+        let mut containing: Option<(u32, NodeIdx)> = None;
         let mut after: Option<(u32, NodeIdx)> = None;
-        for c in view.by_name(name) {
+        for c in view.by_name(bare) {
             let h = view.hot(c);
             let k = NodeKind::from_u8(h.kind).unwrap_or(NodeKind::Variable);
-            // stacked decorators and annotations sit between the route and its method
-            if h.file != self.file
-                || !matches!(k, NodeKind::Method | NodeKind::Function | NodeKind::Component)
-                || h.start_line < r.line
-                || h.start_line > r.line + 12
-            {
+            if h.file != self.file || !matches!(k, NodeKind::Method | NodeKind::Function | NodeKind::Component) {
                 continue;
             }
-            if after.is_none_or(|(l, n)| (h.start_line, c) < (l, n)) {
+            if let Some(ty) = owner {
+                if !self.within(c, ty) {
+                    continue;
+                }
+            }
+            // C# and Java attach preceding attributes/annotations to the method node itself,
+            // so the method's span contains the route attribute and method name line.
+            if h.start_line <= r.line && r.line <= h.end_line {
+                let span = h.end_line.saturating_sub(h.start_line);
+                if containing.is_none_or(|(s, n)| (span, c) < (s, n)) {
+                    containing = Some((span, c));
+                }
+                continue;
+            }
+            // stacked decorators and annotations sit between the route and its method
+            if h.start_line > r.line && h.start_line <= r.line + 12 && after.is_none_or(|(l, n)| (h.start_line, c) < (l, n)) {
                 after = Some((h.start_line, c));
             }
         }
-        Some(Outcome::found(after?.1, by::FRAMEWORK, 92))
+        if let Some((_, target)) = containing {
+            return Some(Outcome::found(target, by::FRAMEWORK, 92));
+        }
+        let in_other_method = owner.is_some_and(|ty| {
+            view.nodes_in_file(self.file).any(|raw| {
+                let n = NodeIdx(raw);
+                let h = view.hot(n);
+                let k = NodeKind::from_u8(h.kind).unwrap_or(NodeKind::Variable);
+                matches!(k, NodeKind::Method | NodeKind::Function)
+                    && self.within(n, ty)
+                    && h.start_line <= r.line
+                    && r.line <= h.end_line
+                    && view.node(n).name() != bare
+            })
+        });
+        if !in_other_method {
+            if let Some((_, target)) = after {
+                return Some(Outcome::found(target, by::FRAMEWORK, 92));
+            }
+        }
+        if let Some(ty) = owner {
+            let overloads = self.e.member_overloads(ty, bare);
+            if overloads.len() == 1 {
+                return Some(Outcome::found(overloads[0], by::FRAMEWORK, 90));
+            }
+            if overloads.len() > 1 {
+                return Some(Outcome::ambiguous(overloads.len() as u32));
+            }
+        }
+        None
     }
 
     fn file_node(&self, f: FileId) -> NodeIdx {

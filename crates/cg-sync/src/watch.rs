@@ -85,8 +85,11 @@ pub(crate) fn is_config_name(name: &str) -> bool {
             | "build.gradle"
             | "build.gradle.kts"
             | "jsconfig.json"
+            | "Directory.Build.props"
+            | "Directory.Packages.props"
     ) || name.starts_with("tsconfig")
         || (name.starts_with("requirements") && name.ends_with(".txt"))
+        || name.ends_with(".csproj")
 }
 
 struct Filter {

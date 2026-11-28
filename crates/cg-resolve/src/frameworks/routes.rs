@@ -17,6 +17,7 @@ pub enum Framework {
     Django,
     Gin,
     Spring,
+    AspNetCore,
     Axum,
     Next,
     Nuxt,
@@ -54,12 +55,12 @@ impl Default for Route {
     }
 }
 
-struct Lines {
+pub(super) struct Lines {
     starts: Vec<usize>,
 }
 
 impl Lines {
-    fn new(src: &str) -> Lines {
+    pub(super) fn new(src: &str) -> Lines {
         let mut starts = vec![0];
         for (i, b) in src.bytes().enumerate() {
             if b == b'\n' {
@@ -69,7 +70,7 @@ impl Lines {
         Lines { starts }
     }
     /// 1-based line and UTF-16 column of a byte offset.
-    fn at(&self, src: &str, off: usize) -> (u32, u32) {
+    pub(super) fn at(&self, src: &str, off: usize) -> (u32, u32) {
         let line = self.starts.partition_point(|s| *s <= off) - 1;
         let start = self.starts[line];
         let end = src[start..].find('\n').map_or(src.len(), |e| start + e);
@@ -109,12 +110,15 @@ re!(kotlin_fun_re, r"(?m)^[ \t]*(?:(?:public|private|protected|internal|override
 re!(spring_class_re, r"(?m)^[ \t]*(?:public[ \t]+|open[ \t]+|abstract[ \t]+)*(?:class|interface)[ \t]+\w+");
 re!(axum_route_re, r#"\.route\(\s*"([^"\n]*)"\s*,\s*"#);
 re!(axum_method_re, r"(get|post|put|delete|patch|head|options|any)\s*\(\s*([\w:]+)\s*\)");
-re!(ident_path_re, r"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$");
+pub(super) fn ident_path_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$").expect("static regex"))
+}
 
 /// Argument list of the call whose `(` is at/after `from`: top-level arguments as
 /// `(offset, text)`, plus the byte offset after the closing parenthesis. Strings and comments
 /// are skipped when matching parentheses.
-fn call_args(src: &str, open: usize) -> Option<(Vec<(usize, &str)>, usize)> {
+pub(super) fn call_args(src: &str, open: usize) -> Option<(Vec<(usize, &str)>, usize)> {
     let b = src.as_bytes();
     if b.get(open) != Some(&b'(') {
         return None;
@@ -523,6 +527,7 @@ pub fn scan(fw: Framework, lang: Lang, rel: &str, src: &str) -> Vec<Route> {
         }
         Framework::Gin => scan_gin(src),
         Framework::Spring => scan_spring(src, lang == Lang::Kotlin),
+        Framework::AspNetCore => super::aspnet::scan_aspnet_core(src),
         Framework::Axum => scan_axum(src),
         Framework::Next => super::jsroutes::scan_next(rel, src),
         Framework::Nuxt => nuxt_page_route(rel).map_or_else(Vec::new, |p| scan_sfc_page(rel, p, "nuxt", ".vue")),
@@ -546,6 +551,7 @@ impl FileHook for RouteHook {
             Framework::Django => "django-routes",
             Framework::Gin => "gin-routes",
             Framework::Spring => "spring-routes",
+            Framework::AspNetCore => "aspnet-core-routes",
             Framework::Axum => "axum-routes",
             Framework::Next => "next-routes",
             Framework::Nuxt => "nuxt-routes",
@@ -564,6 +570,7 @@ impl FileHook for RouteHook {
             Framework::Flask | Framework::FastApi | Framework::Django => lang == Lang::Python,
             Framework::Gin => lang == Lang::Go,
             Framework::Spring => matches!(lang, Lang::Java | Lang::Kotlin),
+            Framework::AspNetCore => lang == Lang::CSharp,
             Framework::Axum => lang == Lang::Rust,
         }
     }
@@ -574,6 +581,24 @@ impl FileHook for RouteHook {
             Framework::Django => &["path(", "url("],
             Framework::Gin => &[".GET(", ".POST(", ".PUT(", ".DELETE(", ".PATCH(", ".Any(", ".OPTIONS(", ".HEAD("],
             Framework::Spring => &["Mapping"],
+            Framework::AspNetCore => &[
+                "HttpGet",
+                "HttpPost",
+                "HttpPut",
+                "HttpDelete",
+                "HttpPatch",
+                "HttpHead",
+                "HttpOptions",
+                "AcceptVerbs",
+                "Route(",
+                "RouteAttribute(",
+                "MapGet",
+                "MapPost",
+                "MapPut",
+                "MapDelete",
+                "MapPatch",
+                "MapMethods",
+            ],
             Framework::Axum => &[".route("],
             Framework::Next | Framework::Nuxt | Framework::SvelteKit => &[],
             Framework::Nest => &[

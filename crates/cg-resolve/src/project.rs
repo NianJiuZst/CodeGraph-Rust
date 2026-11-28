@@ -56,6 +56,7 @@ pub struct ProjectInfo {
     pub crates: Vec<CargoCrate>,
     pub py_deps: FxHashSet<String>,
     pub jvm_deps_text: String,
+    pub dotnet_deps_text: String,
     /// Project-relative PHP web root from `codegraph.json` / `cgr.json` (`webRoot`).
     pub web_root: Option<String>,
     pub config_hashes: BTreeMap<String, u64>,
@@ -161,6 +162,10 @@ impl ProjectInfo {
                     info.jvm_deps_text.push_str(&text);
                     info.jvm_deps_text.push('\n');
                 }
+                n if n.ends_with(".csproj") || matches!(n, "Directory.Build.props" | "Directory.Packages.props") => {
+                    info.dotnet_deps_text.push_str(&text);
+                    info.dotnet_deps_text.push('\n');
+                }
                 n if n.starts_with("tsconfig") || n == "jsconfig.json" => {
                     if let Some(tc) = parse_tsconfig(root, rel, 0) {
                         info.tsconfigs.push(tc);
@@ -230,6 +235,7 @@ impl ProjectInfo {
         add(self.py_deps.contains("django"), "django");
         add(self.go_mod_deps.iter().any(|d| d == "github.com/gin-gonic/gin") || self.go_mods.iter().any(|m| m.module == "github.com/gin-gonic/gin"), "gin");
         add(self.jvm_deps_text.contains("spring-boot") || self.jvm_deps_text.contains("springframework"), "spring");
+        add(self.dotnet_deps_text.contains("Microsoft.NET.Sdk.Web") || self.dotnet_deps_text.contains("Microsoft.AspNetCore"), "aspnet-core");
         add(self.crates.iter().any(|c| c.name == "axum" || c.deps.contains("axum")), "axum");
         v.sort();
         v.dedup();
@@ -392,5 +398,38 @@ mod tests {
         assert_eq!(info.packages[0].entries, vec!["dist/index.js".to_string()]);
         assert_eq!(info.detect_frameworks(), vec!["axum", "express", "flask", "react"]);
         assert!(info.config_hashes.contains_key("go.mod"));
+    }
+
+    #[test]
+    fn detects_aspnet_core_only_from_web_sdk_or_aspnetcore_refs() {
+        let web = tempfile::tempdir().unwrap();
+        fs::write(
+            web.path().join("Api.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk.Web\">\n  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n</Project>\n",
+        )
+        .unwrap();
+        let info = ProjectInfo::load(web.path(), &ProjectConfig::default());
+        assert_eq!(info.detect_frameworks(), vec!["aspnet-core"]);
+        assert!(info.config_hashes.contains_key("Api.csproj"));
+
+        let lib = tempfile::tempdir().unwrap();
+        fs::write(
+            lib.path().join("Directory.Packages.props"),
+            "<Project><ItemGroup><PackageVersion Include=\"Microsoft.AspNetCore.OpenApi\" Version=\"8.0.0\" /></ItemGroup></Project>\n",
+        )
+        .unwrap();
+        let info = ProjectInfo::load(lib.path(), &ProjectConfig::default());
+        assert_eq!(info.detect_frameworks(), vec!["aspnet-core"]);
+        assert!(info.config_hashes.contains_key("Directory.Packages.props"));
+
+        // Plain console/library `.csproj` must NOT trigger `aspnet-core`.
+        let console = tempfile::tempdir().unwrap();
+        fs::write(
+            console.path().join("Cli.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>\n</Project>\n",
+        )
+        .unwrap();
+        let info = ProjectInfo::load(console.path(), &ProjectConfig::default());
+        assert!(info.detect_frameworks().is_empty(), "plain .NET SDK should not detect aspnet-core: {:?}", info.detect_frameworks());
     }
 }
