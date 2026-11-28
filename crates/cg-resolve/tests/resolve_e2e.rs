@@ -1513,3 +1513,182 @@ impl File {
     assert!(!has(&edges, "src/app.rs::File::sync_all -calls-> src/app.rs::File::sync_all"), "a name-only guess is never the caller");
     assert!(has(&edges, "tests/it.rs::t -calls-> tests/support/helper.rs::assist"), "inline `mod support {{ pub mod helper; }}` in a test crate");
 }
+
+#[test]
+fn aspnet_core_controllers_minimal_apis_mediatr_and_http_clients() {
+    let (_d, view) = project(&[
+        ("Api.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\">\n  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n</Project>\n"),
+        (
+            "Controllers/OrdersController.cs",
+            r#"namespace Demo.Controllers;
+using Demo.Queries;
+
+[ApiController]
+[Route("api/[controller]")]
+public class OrdersController : ControllerBase
+{
+    readonly IMediator _mediator;
+
+    [HttpGet]
+    public List<string> Get() => new();
+
+    [Authorize]
+    [HttpGet("{id:int}", Name = "GetOrder")]
+    public string Get(int id)
+    {
+        return _mediator.Send(new GetOrderQuery());
+    }
+}
+"#,
+        ),
+        (
+            "Queries/GetOrder.cs",
+            r#"namespace Demo.Queries;
+public class GetOrderQuery {}
+public class GetOrderHandler : IRequestHandler<GetOrderQuery, string>
+{
+    public string Handle(GetOrderQuery q, int ct) => "ok";
+}
+"#,
+        ),
+        (
+            "Handlers/OrderHandlers.cs",
+            r#"namespace Demo.Handlers;
+public static class OrderHandlers
+{
+    public static string Create() => "created";
+}
+"#,
+        ),
+        (
+            "Endpoints/OrderEndpoints.cs",
+            r#"namespace Demo.Endpoints;
+using Demo.Handlers;
+
+public static class OrderEndpoints
+{
+    public static void Map(WebApplication app)
+    {
+        var v2 = app.MapGroup("/api/v2");
+        v2.MapGet("/orders", ListOrders);
+        v2.MapPost("/orders", OrderHandlers.Create);
+        v2.MapGet("/self", this.ListOrders);
+        v2.MapGet("/health", () => "ok");
+        v2.MapGet("/foreign", ForeignHandler);
+        v2.MapGet("/ambig", Overloaded);
+    }
+
+    // Padding so ListOrders is >12 lines away from MapGet and must resolve via enclosing type.
+    public static void Helper1() {}
+    public static void Helper2() {}
+    public static void Helper3() {}
+    public static void Helper4() {}
+    public static void Helper5() {}
+    public static void Helper6() {}
+    public static void Helper7() {}
+    public static void Helper8() {}
+    public static void Helper9() {}
+    public static void Helper10() {}
+
+    public static string ListOrders() => "all";
+    public static string Overloaded() => "a";
+    public static string Overloaded(int id) => "b";
+}
+
+public static class OtherClass
+{
+    public static string ForeignHandler() => "nope";
+}
+"#,
+        ),
+        ("web/client.ts", "export async function loadOrder(id: number) {\n  return fetch(`/api/orders/${id}`);\n}\n"),
+    ]);
+    let edges = edges_of(&view);
+
+    // Controller stacked attributes + overloaded methods: each route reaches its own overload.
+    let mut get_routes = Vec::new();
+    for f in view.files() {
+        for raw in view.nodes_in_file(f) {
+            let n = cg_core::NodeIdx(raw);
+            let node = view.node(n);
+            if node.kind() == cg_core::NodeKind::Route && node.qname().starts_with("Controllers/OrdersController.cs::") {
+                let targets: Vec<u32> = view.out_edges(n).filter(|e| e.kind == cg_core::EdgeKind::References).map(|e| view.node(e.dst).start_line()).collect();
+                get_routes.push((node.name().to_owned(), targets));
+            }
+        }
+    }
+    get_routes.sort();
+    assert_eq!(get_routes.len(), 2, "expected both overloaded controller routes: {get_routes:?}");
+    assert_eq!(get_routes[0].0, "GET /api/orders");
+    assert_eq!(get_routes[1].0, "GET /api/orders/{id:int}");
+    assert_eq!(get_routes[0].1.len(), 1, "GET /api/orders should resolve to 1 method: {get_routes:?}");
+    assert_eq!(get_routes[1].1.len(), 1, "GET /api/orders/{{id:int}} should resolve to 1 method: {get_routes:?}");
+    assert_ne!(get_routes[0].1[0], get_routes[1].1[0], "overloaded controller routes must hit distinct methods: {get_routes:?}");
+
+    // End-to-end chain: frontend fetch -> ASP.NET Core route -> Controller -> MediatR handler.
+    assert!(
+        has(&edges, "web/client.ts::loadOrder -calls-> Controllers/OrdersController.cs::Controllers/OrdersController.cs::GET:/api/orders/{id:int}"),
+        "frontend fetch should reach ASP.NET Core route: {edges:?}"
+    );
+    assert!(
+        has(
+            &edges,
+            "Controllers/OrdersController.cs::Demo.Controllers::OrdersController::Get -calls-> Queries/GetOrder.cs::Demo.Queries::GetOrderHandler::Handle"
+        ),
+        "controller action should reach MediatR handler: {edges:?}"
+    );
+
+    // Minimal API positive cases: sibling method, cross-file static handler, `this.` handler.
+    assert!(
+        has(
+            &edges,
+            "Endpoints/OrderEndpoints.cs::Endpoints/OrderEndpoints.cs::GET:/api/v2/orders -references-> Endpoints/OrderEndpoints.cs::Demo.Endpoints::OrderEndpoints::ListOrders"
+        ),
+        "{edges:?}"
+    );
+    assert!(
+        has(
+            &edges,
+            "Endpoints/OrderEndpoints.cs::Endpoints/OrderEndpoints.cs::POST:/api/v2/orders -references-> Handlers/OrderHandlers.cs::Demo.Handlers::OrderHandlers::Create"
+        ),
+        "{edges:?}"
+    );
+    assert!(
+        has(
+            &edges,
+            "Endpoints/OrderEndpoints.cs::Endpoints/OrderEndpoints.cs::GET:/api/v2/self -references-> Endpoints/OrderEndpoints.cs::Demo.Endpoints::OrderEndpoints::ListOrders"
+        ),
+        "{edges:?}"
+    );
+
+    // Negative cases: never jump to an unrelated class in the same file, never guess among ambiguous overloads.
+    assert!(
+        !edges.iter().any(|e| e.starts_with("Endpoints/OrderEndpoints.cs::Endpoints/OrderEndpoints.cs::GET:/api/v2/foreign -references->")),
+        "must not link Minimal API handler to unrelated class in same file: {edges:?}"
+    );
+    assert!(
+        !edges.iter().any(|e| e.starts_with("Endpoints/OrderEndpoints.cs::Endpoints/OrderEndpoints.cs::GET:/api/v2/ambig -references->")),
+        "must not guess among ambiguous same-class overloads: {edges:?}"
+    );
+    assert!(
+        !edges.iter().any(|e| e.starts_with("Endpoints/OrderEndpoints.cs::Endpoints/OrderEndpoints.cs::GET:/api/v2/health -references->")),
+        "inline lambda route must not emit bogus handler edges: {edges:?}"
+    );
+}
+
+#[test]
+fn non_web_csharp_project_does_not_emit_aspnet_routes() {
+    let (_d, view) = project(&[
+        ("Cli.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>\n</Project>\n"),
+        ("Program.cs", "[Route(\"api/orders\")]\npublic class FakeController {\n  [HttpGet(\"all\")]\n  public void All() {}\n}\n"),
+    ]);
+    let routes: Vec<_> = view
+        .files()
+        .flat_map(|f| view.nodes_in_file(f))
+        .map(cg_core::NodeIdx)
+        .map(|n| view.node(n))
+        .filter(|n| n.kind() == cg_core::NodeKind::Route)
+        .map(|n| n.qname().to_owned())
+        .collect();
+    assert!(routes.is_empty(), "plain non-web .csproj should not activate ASP.NET Core route hook: {routes:?}");
+}

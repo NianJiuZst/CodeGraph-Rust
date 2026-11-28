@@ -70,8 +70,11 @@ pub fn is_config_filename(name: &str) -> bool {
             | "settings.gradle"
             | "settings.gradle.kts"
             | "composer.json"
+            | "Directory.Build.props"
+            | "Directory.Packages.props"
     ) || (name.starts_with("tsconfig") && name.ends_with(".json"))
         || (name.starts_with("requirements") && name.ends_with(".txt"))
+        || name.ends_with(".csproj")
 }
 
 const CONFIG_MAX_DEPTH: usize = 8;

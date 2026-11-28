@@ -1,6 +1,7 @@
 //! Framework rules (design doc 6.7): detection from manifests, extract hooks that add route
 //! nodes, resolve rules. The hook list is empty for projects that use none.
 
+pub mod aspnet;
 pub mod href;
 pub mod jsroutes;
 pub mod nav;
@@ -47,6 +48,7 @@ pub fn hooks(project: &ProjectInfo) -> Vec<Arc<dyn FileHook>> {
             "django" => Framework::Django,
             "gin" => Framework::Gin,
             "spring" => Framework::Spring,
+            "aspnet-core" => Framework::AspNetCore,
             "axum" => Framework::Axum,
             "next" => Framework::Next,
             "nuxt" => Framework::Nuxt,
