@@ -6,7 +6,7 @@ use cg_core::brand;
 use cg_core::cancel::{Cancellation, Cancelled};
 use cg_query::explore::History;
 use cg_query::strings;
-use cg_query::tools::{self, StatusInfo, ToolEnv, ToolOutput};
+use cg_query::tools::{self, OutputMode, StatusInfo, ToolEnv, ToolOutput};
 use cg_query::Project;
 use cg_store::Store;
 use serde_json::{json, Value};
@@ -482,7 +482,7 @@ impl Server {
         }
         let gen = status.generation;
         let dedup_enabled = self.cfg.dedup && !args.get("noDedup").and_then(|v| v.as_bool()).unwrap_or(false);
-        let env = ToolEnv { graph: &project.graph, history: if self.cfg.dedup { Some(history) } else { None }, status };
+        let env = ToolEnv { graph: &project.graph, history: if self.cfg.dedup { Some(history) } else { None }, status, mode: OutputMode::Mcp };
         let mut out = tools::call(&env, short, args);
         if is_explicit_sync && sync_res.skipped && !out.is_error {
             out.text = format!("> Note: explicit `sync: true` could not acquire the index lock in time; answering from the existing snapshot.\n\n{}", out.text);

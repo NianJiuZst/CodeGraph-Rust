@@ -8,6 +8,7 @@
 use crate::explore::{ExploreOptions, ExploreResult, History, SentFile};
 use crate::graph::Graph;
 use crate::source::SourceView;
+use crate::strings::{self, OutputMode};
 use cg_core::{EdgeKind, FileId, Lang, NodeIdx, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
@@ -485,7 +486,7 @@ pub fn try_explore_one_symbol(g: &Graph, query: &str, max_chars: usize, opts: &E
     let mut caps = FULL_CAPS;
     let mut body_chars = (max_chars / 2).min(8_000).max(max_chars.min(600));
     for attempt in 0..=4 {
-        let cfg = ComposeCfg { caps, body_chars, compact: opts.compact, history: history.as_deref() };
+        let cfg = ComposeCfg { caps, body_chars, compact: opts.compact, history: history.as_deref(), mode: opts.mode };
         let (mut text, files, sent_now, meta) = compose(g, &name, &collected, &sources, &cfg);
         if text.len() <= max_chars || attempt == 4 {
             let mut truncated = false;
@@ -517,6 +518,7 @@ struct ComposeCfg<'a> {
     body_chars: usize,
     compact: bool,
     history: Option<&'a History>,
+    mode: OutputMode,
 }
 
 fn compose(
@@ -529,7 +531,7 @@ fn compose(
     let mut out = String::new();
     let mut file_set: FxHashSet<FileId> = FxHashSet::default();
     let mut sent_now: BTreeMap<String, SentFile> = BTreeMap::new();
-    let mut meta = crate::tools::ToolMeta::default();
+    let mut meta = crate::tools::ToolMeta { one_symbol: true, ..Default::default() };
     let per_def_body = (cfg.body_chars / collected.len().max(1)).max(600);
     let per_def_caps = if collected.len() == 1 { cfg.caps } else { cfg.caps.halve() };
 
@@ -582,7 +584,7 @@ fn compose(
             if let Some(sig) = g.view.node(*def).signature() {
                 let _ = writeln!(out, "**Signature:** `{}`\n", sig.split_whitespace().collect::<Vec<_>>().join(" "));
             }
-            let _ = writeln!(out, "> Compact mode omits source bodies. Drop `compact` or call `node` for verbatim code.\n");
+            let _ = writeln!(out, "{}\n", strings::compact_one_symbol_note(cfg.mode));
         } else if let Some(sv) = sources.get(&def_file) {
             let (body, shown_to, cut) = render_body(sv, start, end, per_def_body);
             let fenced_len = body.len() + lang.len() + 8;
@@ -597,11 +599,7 @@ fn compose(
             } else {
                 let _ = writeln!(out, "```{lang}\n{body}\n```");
                 if cut {
-                    let _ = writeln!(
-                        out,
-                        "(lines {start}–{shown_to} of {start}–{end} shown — pass `node` with `file: \"{def_path}\"` and `offset: {}` for the rest)",
-                        shown_to + 1
-                    );
+                    let _ = writeln!(out, "{}", strings::one_symbol_body_cut_note(cfg.mode, start, shown_to, end, def_path));
                 }
                 out.push('\n');
                 if !covered {
@@ -614,7 +612,7 @@ fn compose(
         if prod_usage.is_empty() && tests.is_empty() {
             let unresolved = g.view.unresolved_refs_by_tail(g.name(*def), cg_store::UnresolvedScope::Dependency, 5);
             meta.record_tail_idx(&unresolved);
-            let hint = crate::tools::format_unresolved_hint(g, g.name(*def), "references", &unresolved);
+            let hint = crate::tools::format_unresolved_hint(g, g.name(*def), "references", &unresolved, cfg.mode);
             if !hint.is_empty() {
                 let _ = writeln!(out, "{hint}\n");
             }
@@ -736,7 +734,7 @@ fn compose(
             } else {
                 let outgoing = g.view.unresolved_refs_from(*def, cg_store::UnresolvedScope::CallLike, 5);
                 meta.record_tail_idx(&outgoing);
-                let hint = crate::tools::format_unresolved_hint(g, g.name(*def), "callees", &outgoing);
+                let hint = crate::tools::format_unresolved_hint(g, g.name(*def), "callees", &outgoing, cfg.mode);
                 if !hint.is_empty() {
                     let _ = writeln!(out, "{hint}\n");
                 }

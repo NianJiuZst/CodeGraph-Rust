@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.3.2 — 2026-11-28
+
+### Mode-aware CLI/MCP hints, `one_symbol` telemetry, and streamlined `SKILL.md` (`ENGINE_VERSION = 15`)
+
+- **Mode-aware CLI vs MCP hints & `one_symbol` telemetry (`cg-query`, `cg-mcp`, `cgr`)**:
+  - Introduce `OutputMode` (`Mcp` default vs `Cli`) across `cg-query` formatting helpers so `cgr` CLI responses emit CLI commands and flags (`cgr explore`, `cgr node`, `--compact`, `--no-dedup`, `--symbols-only`, `--offset`/`--limit`, `--file`, `--depth`) with zero MCP syntax leakage, while `cgr serve --mcp` preserves 100% backward-compatible MCP wording.
+  - Record `one_symbol: bool` in `ToolMeta` and `CGR_TELEMETRY_LOG` JSONL events across both CLI and MCP paths to track focused single-symbol `explore` hits vs general/fallback queries.
+- **Agent Skill (`skills/codegraph-rust/SKILL.md`)**:
+  - Streamline `SKILL.md` (-43% size), remove mandatory Turn-1 `cgr status --json`, add Turn-1 entry-query routing (preserving single-symbol mode without `--max-files`), restore verbatim `<n>\t<line>` no-re-read rule, prefer compact plain-text/quiet CLI outputs and bounded `read_file` windows, and use `--format flat` for scoped `cgr files <dir>`.
+- **Rust 1.94+ clippy compatibility (`cg-extract`)**:
+  - Simplify two negated `Option::is_some_and` predicates in `cpp_preparse.rs` and `facts/java.rs` to satisfy `clippy::nonminimal_bool` cleanly under `-D warnings`.
+
 ## 0.3.1 — 2026-11-25
 
 ### Cross-tool session deduplication, `tail_idx` telemetry & guidance, and MCP/CLI parity (`ENGINE_VERSION = 15`)

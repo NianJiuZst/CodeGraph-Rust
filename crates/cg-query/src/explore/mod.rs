@@ -225,6 +225,8 @@ pub struct ExploreOptions {
     pub compact: bool,
     /// Session de-duplication history; `None` re-serves source on every call.
     pub history: Option<Arc<Mutex<History>>>,
+    /// Surface mode driving command/flag hints (`Mcp` vs `Cli`).
+    pub mode: strings::OutputMode,
 }
 
 pub struct ExploreResult {
@@ -754,10 +756,7 @@ impl Graph {
         if n_files > 0 {
             if opts.compact {
                 text.push_str("**Symbols (compact outline)**\n\n");
-                text.push_str(&format!(
-                    "> Compact mode omits source bodies. Drop `compact` or call `{}` on a symbol for verbatim code.\n\n",
-                    strings::tool("node")
-                ));
+                text.push_str(&strings::compact_explore_note(opts.mode));
             } else {
                 text.push_str("**Source Code**\n\n");
                 text.push_str(strings::VERBATIM_NOTE);
@@ -796,22 +795,25 @@ impl Graph {
         }
         if trimmed_any {
             epilogue.push('\n');
-            epilogue.push_str(&strings::trimmed_sections_note());
+            epilogue.push_str(&strings::trimmed_sections_note_for(opts.mode));
             epilogue.push('\n');
         }
         if budget.extras && !opts.compact {
             epilogue.push('\n');
-            epilogue.push_str(&strings::budget_note(self.indexed_files(), budget.calls));
+            epilogue.push_str(&strings::budget_note_for(opts.mode, self.indexed_files(), budget.calls));
             epilogue.push('\n');
         }
         if text.len() + epilogue.len() <= hard {
             text.push_str(&epilogue);
-        } else if text.len() + strings::cut_note(trimmed_any).len() <= hard {
-            text.push_str(&strings::cut_note(trimmed_any));
+        } else {
+            let cut_note = strings::cut_note_for(opts.mode, trimmed_any);
+            if text.len() + cut_note.len() <= hard {
+                text.push_str(&cut_note);
+            }
         }
         let mut cut_boundary: Option<usize> = None;
         if text.len() > hard {
-            let note = strings::truncated_note(trimmed_any);
+            let note = strings::truncated_note_for(opts.mode, trimmed_any);
             // Reserve space for the truncation note so the final output stays strictly within `hard`.
             let mut cut = hard.saturating_sub(note.len()).min(text.len());
             while cut > 0 && !text.is_char_boundary(cut) {

@@ -6,7 +6,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use cg_core::{brand, NodeKind};
-use cg_query::tools::{self, ToolEnv};
+use cg_query::tools::{self, OutputMode, ToolEnv};
 use cg_query::Project;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -161,7 +161,7 @@ fn make_queries(proj: &Project, file: Option<&Path>, n: usize, seed: u64) -> Res
 }
 
 fn run_explore(proj: &Project, q: &str) -> (f64, usize) {
-    let env = ToolEnv { graph: &proj.graph, history: None, status: proj.status_info() };
+    let env = ToolEnv { graph: &proj.graph, history: None, status: proj.status_info(), mode: OutputMode::Cli };
     let t = Instant::now();
     let out = tools::call(&env, "explore", &json!({"query": q}));
     (ms(t.elapsed()), out.text.len())

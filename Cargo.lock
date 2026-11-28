@@ -191,7 +191,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "cg-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bytemuck",
  "libc",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "cg-extract"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "aho-corasick",
  "cg-core",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "cg-install"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "cg-core",
  "jsonc-parser",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "cg-mcp"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "cg-core",
  "cg-query",
@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "cg-query"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "cg-core",
  "cg-resolve",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "cg-resolve"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "aho-corasick",
  "cg-core",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "cg-scan"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "cg-core",
  "globset",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "cg-store"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bytemuck",
  "cg-core",
@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "cg-sync"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "cg-core",
  "cg-extract",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "cgr"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "cg-core",

@@ -14,3 +14,4 @@ pub mod traverse;
 pub use graph::Graph;
 pub use project::Project;
 pub use search::{Hit, SearchOptions};
+pub use strings::OutputMode;

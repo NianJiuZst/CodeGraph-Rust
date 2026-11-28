@@ -512,8 +512,8 @@ cgr serve --http 127.0.0.1:7878 --path /absolute/path/to/project
 ### 作为 Agent Skill 使用（CLI 工作流）
 
 对于支持加载 `SKILL.md` 的编码 Agent（Claude Code、Codex、Antigravity、Cursor、OpenCode），如果希望免常驻 MCP 服务直接通过 CLI 使用图谱，
-仓库内置了开箱即用的 [`skills/codegraph-rust/SKILL.md`](skills/codegraph-rust/SKILL.md)，涵盖紧凑结构图优先探索
-（`cgr explore --compact --max-chars 6000 --max-files 6`）、有界多符号源码读取（`cgr node --code --max-chars 8000`）、
+仓库内置了开箱即用的 [`skills/codegraph-rust/SKILL.md`](skills/codegraph-rust/SKILL.md)，涵盖首轮直查分流
+（紧凑结构图 `cgr explore --compact --max-chars 5000 --max-files 6`、单符号直出 `cgr explore "<Sym>" --max-chars 6000`）、有界多符号源码读取（`cgr node --code --max-chars 6000`）、
 内联 `--sync`、`CGR_SESSION` 跨调用去重、`tail_idx` 动态回退以及克制化定向验证等实测提效规则。
 
 ```sh
@@ -577,7 +577,7 @@ curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scri
 | `CGR_DEDUP=1` / `CGR_EXPLORE_DEDUP=1` | 在 MCP 会话中启用跨 `explore`/`node`/`callers`/`callees` 去重（也可用 `--dedup`） |
 | `CGR_SESSION` | CLI 跨 `explore`/`node`/`callers`/`callees` 会话去重 ID（保存在 `.cgr/sessions/`） |
 | `CGR_AUTO_SYNC` | `1` 开启 CLI 查询前自动增量同步；`0` 关闭 `cgr serve` 默认查询前同步 |
-| `CGR_TELEMETRY_LOG` | 可选 JSONL 遥测日志路径，记录每次查询耗时、同步、去重节省字节与 `tail_idx` 触发统计（未设置时零开销） |
+| `CGR_TELEMETRY_LOG` | 可选 JSONL 遥测日志路径，记录每次查询耗时、同步、`one_symbol` 命中、去重节省字节与 `tail_idx` 触发统计（未设置时零开销） |
 | `CGR_NO_PROMPT_HOOK=1` | 运行时禁用可选的 Claude Code 提示钩子 |
 | `CGR_HTTP_TOKEN` | 要求 HTTP 请求使用 Bearer Token |
 | `CGR_LOG` | 服务日志过滤条件，默认 `warn`，写入 stderr |

@@ -5,12 +5,139 @@
 
 use cg_core::brand;
 
+/// Output surface driving user-facing command and flag hints in query responses.
+/// Defaults to [`OutputMode::Mcp`] so direct `Graph::explore` / `ToolEnv` callers keep
+/// MCP wording unless explicitly running through the CLI.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputMode {
+    #[default]
+    Mcp,
+    Cli,
+}
+
+impl OutputMode {
+    pub fn flag(self, mcp: &'static str, cli: &'static str) -> &'static str {
+        match self {
+            OutputMode::Mcp => mcp,
+            OutputMode::Cli => cli,
+        }
+    }
+}
+
 pub fn explore_tool() -> String {
     format!("{}explore", brand::MCP_TOOL_PREFIX)
 }
 
 pub fn tool(short: &str) -> String {
     format!("{}{short}", brand::MCP_TOOL_PREFIX)
+}
+
+pub fn explore_tool_for(mode: OutputMode) -> String {
+    tool_for(mode, "explore")
+}
+
+pub fn tool_for(mode: OutputMode, short: &str) -> String {
+    match mode {
+        OutputMode::Mcp => tool(short),
+        OutputMode::Cli => format!("{} {short}", brand::BIN_NAME),
+    }
+}
+
+fn explore_inline(mode: OutputMode) -> String {
+    match mode {
+        OutputMode::Mcp => explore_tool(),
+        OutputMode::Cli => format!("`{} explore`", brand::BIN_NAME),
+    }
+}
+
+pub fn dedup_reuse_hint(mode: OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Mcp => "reuse or pass `noDedup: true`.",
+        OutputMode::Cli => "reuse or pass `--no-dedup`.",
+    }
+}
+
+pub fn dedup_copy_hint(mode: OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Mcp => "use that copy or pass `noDedup: true`.",
+        OutputMode::Cli => "use that copy or pass `--no-dedup`.",
+    }
+}
+
+pub fn compact_explore_note(mode: OutputMode) -> String {
+    match mode {
+        OutputMode::Mcp => {
+            format!("> Compact mode omits source bodies. Drop `compact` or call `{}` on a symbol for verbatim code.\n\n", tool("node"))
+        }
+        OutputMode::Cli => {
+            format!("> Compact mode omits source bodies. Drop `--compact` or run `{} node <symbol> --code` for verbatim code.\n\n", brand::BIN_NAME)
+        }
+    }
+}
+
+pub fn compact_one_symbol_note(mode: OutputMode) -> String {
+    match mode {
+        OutputMode::Mcp => "> Compact mode omits source bodies. Drop `compact` or call `node` for verbatim code.".to_owned(),
+        OutputMode::Cli => {
+            format!("> Compact mode omits source bodies. Drop `--compact` or run `{} node <symbol> --code` for verbatim code.", brand::BIN_NAME)
+        }
+    }
+}
+
+pub fn one_symbol_body_cut_note(mode: OutputMode, start: u32, shown_to: u32, end: u32, path: &str) -> String {
+    let next = shown_to + 1;
+    match mode {
+        OutputMode::Mcp => {
+            format!("(lines {start}–{shown_to} of {start}–{end} shown — pass `node` with `file: \"{path}\"` and `offset: {next}` for the rest)")
+        }
+        OutputMode::Cli => {
+            format!("(lines {start}–{shown_to} of {start}–{end} shown — run `{} node {path} --offset {next}` for the rest)", brand::BIN_NAME)
+        }
+    }
+}
+
+pub fn container_outline_note(mode: OutputMode, path: &str) -> String {
+    match mode {
+        OutputMode::Mcp => format!("> Structural outline only. Read `{path}` or call {} on a specific member for its body.", tool("node")),
+        OutputMode::Cli => {
+            format!("> Structural outline only. Read `{path}` or run `{} node` with `--code` on a specific member for its body.", brand::BIN_NAME)
+        }
+    }
+}
+
+pub fn node_trail_header(mode: OutputMode) -> String {
+    match mode {
+        OutputMode::Mcp => format!("**Trail — {} any of these to follow it (no Read needed)**", tool("node")),
+        OutputMode::Cli => format!("**Trail — run `{} node` on any of these to follow it (no Read needed)**", brand::BIN_NAME),
+    }
+}
+
+pub fn symbols_only_footer(mode: OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Mcp => "> Drop `symbolsOnly` (or pass `offset`/`limit`) to read the source, like Read.",
+        OutputMode::Cli => "> Drop `--symbols-only` (or pass `--offset`/`--limit`) to read the source, like Read.",
+    }
+}
+
+pub fn file_view_range_footer(mode: OutputMode, offset: usize, shown_end: usize, total: usize, line_clipped: bool) -> String {
+    let clipped = if line_clipped { ", partial line" } else { "" };
+    match mode {
+        OutputMode::Mcp => format!(
+            "(lines {offset}–{shown_end} of {total}{clipped} — pass `offset`/`limit` for another range, or `{} <symbol>` for one symbol in full)",
+            tool("node")
+        ),
+        OutputMode::Cli => format!(
+            "(lines {offset}–{shown_end} of {total}{clipped} — pass `--offset`/`--limit` for another range, or `{} node <symbol> --code` for one symbol in full)",
+            brand::BIN_NAME
+        ),
+    }
+}
+
+pub fn impact_truncated_note(mode: OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Mcp => "> Result truncated to protect the MCP process on a high-fanout graph. Narrow with `file` or reduce `depth`.",
+        OutputMode::Cli => "> Result truncated on a high-fanout graph. Narrow with `--file` or reduce `--depth`.",
+    }
 }
 
 pub fn brandify(s: &str) -> String {
@@ -122,11 +249,19 @@ pub const FLOW_FOOTER: &str = "> Full source for these symbols is below — the 
 pub const POINTER_HEADER: &str = "**Not shown above — explore these names for their source**";
 
 pub fn lost_note() -> String {
-    format!("> (Trailing pointer list omitted for size. The source above is complete and verbatim — treat it as already Read. For anything this call did not cover, run another {} with the specific names rather than reading those files.)", explore_tool())
+    lost_note_for(OutputMode::Mcp)
+}
+
+pub fn lost_note_for(mode: OutputMode) -> String {
+    format!("> (Trailing pointer list omitted for size. The source above is complete and verbatim — treat it as already Read. For anything this call did not cover, run another {} with the specific names rather than reading those files.)", explore_inline(mode))
 }
 
 pub fn cut_note(trimmed: bool) -> String {
-    let ex = explore_tool();
+    cut_note_for(OutputMode::Mcp, trimmed)
+}
+
+pub fn cut_note_for(mode: OutputMode, trimmed: bool) -> String {
+    let ex = explore_inline(mode);
     if trimmed {
         format!("\n\n> (Trailing notes omitted for size. The source above is verbatim — treat it as already Read. For symbols its gap markers name, and anything else not covered, run another {ex} with those names rather than reading.)")
     } else {
@@ -135,7 +270,11 @@ pub fn cut_note(trimmed: bool) -> String {
 }
 
 pub fn truncated_note(trimmed: bool) -> String {
-    let ex = explore_tool();
+    truncated_note_for(OutputMode::Mcp, trimmed)
+}
+
+pub fn truncated_note_for(mode: OutputMode, trimmed: bool) -> String {
+    let ex = explore_inline(mode);
     if trimmed {
         format!("\n\n... (output truncated to budget; the source above is verbatim — treat it as already Read. For names its gap markers list, or any area not covered, run another {ex} — do NOT Read these files.)")
     } else {
@@ -144,14 +283,22 @@ pub fn truncated_note(trimmed: bool) -> String {
 }
 
 pub fn trimmed_sections_note() -> String {
-    format!("> Some file sections were trimmed for size. Elided symbols are named inside gap markers as `name (file:line)` and preferred in the file header — run another `{}` with those exact names for their source.", explore_tool())
+    trimmed_sections_note_for(OutputMode::Mcp)
+}
+
+pub fn trimmed_sections_note_for(mode: OutputMode) -> String {
+    format!("> Some file sections were trimmed for size. Elided symbols are named inside gap markers as `name (file:line)` and preferred in the file header — run another `{}` with those exact names for their source.", explore_tool_for(mode))
 }
 
 pub fn budget_note(file_count: usize, calls: u32) -> String {
+    budget_note_for(OutputMode::Mcp, file_count, calls)
+}
+
+pub fn budget_note_for(mode: OutputMode, file_count: usize, calls: u32) -> String {
     format!(
         "> **Exploration guidance — advisory only, NOT a quota: this project (~{} files indexed) is usually covered in ≈{calls} focused explore calls, and extra calls are never rejected or rate-limited.** If the response above does not fully cover your question, run another {} on the uncovered symbols — it is cheaper and more complete than Read. Only stop exploring when the response actually covers the flow you asked about.",
         thousands(file_count),
-        explore_tool()
+        explore_inline(mode)
     )
 }
 

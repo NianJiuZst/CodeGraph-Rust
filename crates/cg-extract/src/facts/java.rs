@@ -192,7 +192,7 @@ fn import(cx: &mut Cx, n: Node, scope: u32) {
 /// override; restore the `super.` receiver so the call resolves in the ancestors.
 fn super_receiver(cx: &mut Cx, n: Node) {
     let Some(name) = n.child_by_field_name("name") else { return };
-    if !n.child_by_field_name("object").is_some_and(|o| o.kind() == "super") {
+    if n.child_by_field_name("object").is_none_or(|o| o.kind() != "super") {
         return;
     }
     let pos = cx.start(n);

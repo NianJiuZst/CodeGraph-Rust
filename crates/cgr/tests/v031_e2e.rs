@@ -241,3 +241,249 @@ fn mcp_stdio_auto_sync_cross_tool_dedup_budget_and_telemetry() {
     );
     assert!(events.iter().any(|e| e["tool"] == "callers" && e["sync_checked"] == true && e["synced"] == true), "MCP auto_sync telemetry expected: {events:?}");
 }
+
+fn write_mode_and_telemetry_fixture(root: &Path) {
+    write(
+        root,
+        "src/pricing.ts",
+        concat!(
+            "export function computeDiscount(subtotal: number, tier: number): number {\n",
+            "  const clamped = Math.max(0, subtotal);\n",
+            "  const rate = tier > 2 ? 0.15 : 0.05;\n",
+            "  const reduction = Math.round(clamped * rate * 100) / 100;\n",
+            "  const finalAmount = Math.max(0, clamped - reduction);\n",
+            "  return finalAmount;\n",
+            "}\n",
+            "export class OrderService {\n",
+            "  validateOrder(subtotal: number): boolean {\n",
+            "    return subtotal >= 0;\n",
+            "  }\n",
+            "  processOrder(subtotal: number, tier: number): number {\n",
+            "    if (!this.validateOrder(subtotal)) return 0;\n",
+            "    return computeDiscount(subtotal, tier);\n",
+            "  }\n",
+            "}\n",
+            "export function callerAlpha(v: number): number { return computeDiscount(v, 1); }\n",
+            "export function callerBeta(v: number): number { return computeDiscount(v, 2); }\n",
+            "export function callerGamma(v: number): number { return computeDiscount(v, 3); }\n",
+            "export function callerDelta(v: number): number { return computeDiscount(v, 4); }\n",
+        ),
+    );
+    let mut catalog = String::new();
+    for i in 1..=80 {
+        catalog.push_str(&format!("export function catalogItem_{i}(base: number): number {{\n  const adjusted = base + {i};\n  return adjusted * 2;\n}}\n"));
+    }
+    write(root, "src/catalog.ts", &catalog);
+}
+
+fn assert_no_mcp_leakage(label: &str, text: &str) {
+    for forbidden in ["codegraph-rust_node", "codegraph-rust_explore", "noDedup: true", "Drop `symbolsOnly`", "Drop `compact`"] {
+        assert!(!text.contains(forbidden), "{label} leaked MCP syntax `{forbidden}`:\n{text}");
+    }
+}
+
+#[test]
+fn cli_emits_cli_hints_without_mcp_leakage_and_records_one_symbol_telemetry() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let telem = root.join(".cli_hints_telemetry.jsonl");
+    write_mode_and_telemetry_fixture(root);
+    run_ok(root, &["init", "--local-only"], &[]);
+
+    let envs = [("CGR_SESSION", "sess-hints-cli"), ("CGR_TELEMETRY_LOG", telem.to_str().unwrap())];
+
+    // 1. General multi-symbol explore --compact -> CLI syntax, one_symbol = false.
+    let exp_compact_multi = run_ok(root, &["explore", "--compact", "computeDiscount processOrder"], &envs);
+    assert!(exp_compact_multi.contains("Compact mode omits source bodies"), "{exp_compact_multi}");
+    assert!(exp_compact_multi.contains("Drop `--compact`"), "{exp_compact_multi}");
+    assert!(exp_compact_multi.contains("cgr node"), "{exp_compact_multi}");
+    assert_no_mcp_leakage("cli explore --compact multi", &exp_compact_multi);
+
+    // 2. Focused one-symbol explore --compact -> CLI syntax, one_symbol = true.
+    let exp_compact_one = run_ok(root, &["explore", "--compact", "computeDiscount"], &envs);
+    assert!(exp_compact_one.contains("Compact mode omits source bodies"), "{exp_compact_one}");
+    assert!(exp_compact_one.contains("Drop `--compact`"), "{exp_compact_one}");
+    assert!(exp_compact_one.contains("cgr node"), "{exp_compact_one}");
+    assert_no_mcp_leakage("cli explore --compact one", &exp_compact_one);
+
+    // 3. Focused one-symbol explore full -> caches computeDiscount body, one_symbol = true.
+    let exp_one = run_ok(root, &["explore", "computeDiscount"], &envs);
+    assert!(exp_one.contains("const finalAmount = Math.max(0, clamped - reduction);"), "{exp_one}");
+    assert_no_mcp_leakage("cli explore one", &exp_one);
+
+    // 4. Single-symbol explore with --max-files forces general explore -> one_symbol = false.
+    let exp_max_files = run_ok(root, &["explore", "computeDiscount", "--max-files", "3", "--no-dedup"], &envs);
+    assert!(exp_max_files.contains("**Exploration:"), "{exp_max_files}");
+    assert_no_mcp_leakage("cli explore --max-files", &exp_max_files);
+
+    // 5. Tight general explore truncation note -> CLI `cgr explore`, one_symbol = false.
+    let exp_trunc = run_ok(root, &["explore", "computeDiscount processOrder catalogItem_1", "--max-chars", "1100", "--no-dedup"], &envs);
+    assert!(exp_trunc.contains("cgr explore"), "truncation note must reference `cgr explore`: {exp_trunc}");
+    assert_no_mcp_leakage("cli explore truncated", &exp_trunc);
+
+    // 6. Container outline via `cgr node OrderService --code` -> CLI syntax, one_symbol = false.
+    let node_container = run_ok(root, &["node", "OrderService", "--code"], &envs);
+    assert!(node_container.contains("Structural outline only"), "{node_container}");
+    assert!(node_container.contains("cgr node"), "{node_container}");
+    assert_no_mcp_leakage("cli node container", &node_container);
+
+    // 7. Symbol dedup + Trail header via `cgr node computeDiscount --code` -> CLI `--no-dedup` & `cgr node`.
+    let node_dedup = run_ok(root, &["node", "computeDiscount", "--code"], &envs);
+    assert!(node_dedup.contains("Already sent earlier in this conversation"), "{node_dedup}");
+    assert!(node_dedup.contains("--no-dedup"), "dedup notice must use --no-dedup: {node_dedup}");
+    assert!(node_dedup.contains("**Trail —") && node_dedup.contains("cgr node"), "trail header must use cgr node: {node_dedup}");
+    assert_no_mcp_leakage("cli node dedup", &node_dedup);
+
+    // 8. File `--symbols-only` footer -> CLI `--symbols-only` and `--offset`/`--limit`.
+    let file_syms = run_ok(root, &["node", "src/catalog.ts", "--symbols-only"], &envs);
+    assert!(file_syms.contains("--symbols-only"), "{file_syms}");
+    assert!(file_syms.contains("--offset") && file_syms.contains("--limit"), "{file_syms}");
+    assert_no_mcp_leakage("cli node --symbols-only", &file_syms);
+
+    // 9. File pagination footer (first + dedup repeat) -> CLI `--offset`/`--limit`, `cgr node`, `--no-dedup`.
+    let file_page1 = run_ok(root, &["node", "src/catalog.ts", "--limit", "25"], &envs);
+    assert!(file_page1.contains("--offset") && file_page1.contains("--limit"), "{file_page1}");
+    assert!(file_page1.contains("cgr node <symbol>"), "{file_page1}");
+    assert_no_mcp_leakage("cli node file page1", &file_page1);
+
+    let file_page2 = run_ok(root, &["node", "src/catalog.ts", "--limit", "25"], &envs);
+    assert!(file_page2.contains("Already sent earlier in this conversation"), "{file_page2}");
+    assert!(file_page2.contains("--no-dedup"), "{file_page2}");
+    assert!(file_page2.contains("--offset") && file_page2.contains("--limit"), "{file_page2}");
+    assert!(file_page2.contains("cgr node <symbol>"), "{file_page2}");
+    assert_no_mcp_leakage("cli node file page2", &file_page2);
+
+    // 10. `callers` widening (`--limit`) + dedup (`--no-dedup`, no `noDedup: true`).
+    let callers1 = run_ok(root, &["callers", "computeDiscount", "--limit", "3"], &envs);
+    assert!(callers1.contains("pass `--limit`"), "callers widen hint must use --limit: {callers1}");
+    assert_no_mcp_leakage("cli callers", &callers1);
+    let callers2 = run_ok(root, &["callers", "computeDiscount", "--limit", "3"], &envs);
+    assert!(callers2.contains("Already sent earlier in this conversation"), "{callers2}");
+    assert!(callers2.contains("--no-dedup"), "callers dedup must use --no-dedup: {callers2}");
+    assert_no_mcp_leakage("cli callers dedup", &callers2);
+
+    // 11. Verify JSONL telemetry `one_symbol` accuracy across all 12 CLI calls.
+    let events = read_jsonl(&telem);
+    assert_eq!(events.len(), 12, "expected 12 CLI telemetry events: {events:?}");
+    assert!(events.iter().all(|e| e["mode"] == "cli" && e["one_symbol"].is_boolean()), "{events:?}");
+    assert_eq!((events[0]["tool"].as_str(), events[0]["one_symbol"].as_bool()), (Some("explore"), Some(false)));
+    assert_eq!((events[1]["tool"].as_str(), events[1]["one_symbol"].as_bool()), (Some("explore"), Some(true)));
+    assert_eq!((events[2]["tool"].as_str(), events[2]["one_symbol"].as_bool()), (Some("explore"), Some(true)));
+    assert_eq!((events[3]["tool"].as_str(), events[3]["one_symbol"].as_bool()), (Some("explore"), Some(false)));
+    assert_eq!((events[4]["tool"].as_str(), events[4]["one_symbol"].as_bool()), (Some("explore"), Some(false)));
+    for ev in &events[5..] {
+        assert_ne!(ev["tool"], "explore", "expected non-explore tool: {ev:?}");
+        assert_eq!(ev["one_symbol"], false, "non-explore tools must record one_symbol=false: {ev:?}");
+    }
+}
+
+#[test]
+fn mcp_preserves_mcp_hints_and_records_one_symbol_telemetry() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let telem = root.join(".mcp_hints_telemetry.jsonl");
+    write_mode_and_telemetry_fixture(root);
+    run_ok(root, &["init", "--local-only"], &[]);
+
+    let mut child = cgr()
+        .current_dir(root)
+        .args(["serve", "--mcp", "--dedup", "--no-watch"])
+        .env("CGR_MCP_TOOLS", "explore,node,callers,callees,impact,implementations,search,files,status")
+        .env("CGR_TELEMETRY_LOG", telem.to_str().unwrap())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cgr serve");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let mut rpc = |id: i64, method: &str, params: Value| -> Value {
+        let req = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(stdin, "{req}").unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        stdout.read_line(&mut line).expect("read json-rpc response");
+        serde_json::from_str(&line).expect("valid json-rpc response")
+    };
+    let text_of = |v: &Value| v["result"]["content"][0]["text"].as_str().unwrap().to_owned();
+
+    let init_r = rpc(1, "initialize", json!({"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "1"}}));
+    assert_eq!(init_r["result"]["serverInfo"]["name"], "codegraph-rust");
+
+    // 1. General multi-symbol explore compact -> MCP syntax (`compact`, `codegraph-rust_node`), one_symbol = false.
+    let exp_compact_multi =
+        text_of(&rpc(2, "tools/call", json!({"name": "codegraph-rust_explore", "arguments": {"query": "computeDiscount processOrder", "compact": true}})));
+    assert!(exp_compact_multi.contains("Drop `compact`"), "{exp_compact_multi}");
+    assert!(exp_compact_multi.contains("codegraph-rust_node"), "{exp_compact_multi}");
+
+    // 2. Focused one-symbol explore compact -> MCP syntax, one_symbol = true.
+    let exp_compact_one = text_of(&rpc(3, "tools/call", json!({"name": "codegraph-rust_explore", "arguments": {"query": "computeDiscount", "compact": true}})));
+    assert!(exp_compact_one.contains("Drop `compact`"), "{exp_compact_one}");
+
+    // 3. Focused one-symbol explore full -> caches computeDiscount body, one_symbol = true.
+    let exp_one = text_of(&rpc(4, "tools/call", json!({"name": "codegraph-rust_explore", "arguments": {"query": "computeDiscount"}})));
+    assert!(exp_one.contains("const finalAmount = Math.max(0, clamped - reduction);"), "{exp_one}");
+
+    // 4. Single-symbol explore with maxFiles -> falls back to general explore, one_symbol = false.
+    let exp_max_files =
+        text_of(&rpc(5, "tools/call", json!({"name": "codegraph-rust_explore", "arguments": {"query": "computeDiscount", "maxFiles": 3, "noDedup": true}})));
+    assert!(exp_max_files.contains("**Exploration:"), "{exp_max_files}");
+
+    // 5. Tight general explore truncation note -> MCP `codegraph-rust_explore`, one_symbol = false.
+    let exp_trunc = text_of(&rpc(
+        6,
+        "tools/call",
+        json!({"name": "codegraph-rust_explore", "arguments": {"query": "computeDiscount processOrder catalogItem_1", "maxChars": 1100, "noDedup": true}}),
+    ));
+    assert!(exp_trunc.contains("codegraph-rust_explore"), "MCP truncation note must keep codegraph-rust_explore: {exp_trunc}");
+
+    // 6. Container outline via MCP node -> MCP `codegraph-rust_node`.
+    let node_container = text_of(&rpc(7, "tools/call", json!({"name": "codegraph-rust_node", "arguments": {"symbol": "OrderService", "includeCode": true}})));
+    assert!(node_container.contains("Structural outline only") && node_container.contains("codegraph-rust_node"), "{node_container}");
+
+    // 7. Symbol dedup + Trail via MCP node -> MCP `noDedup: true` and `**Trail — codegraph-rust_node`.
+    let node_dedup = text_of(&rpc(8, "tools/call", json!({"name": "codegraph-rust_node", "arguments": {"symbol": "computeDiscount", "includeCode": true}})));
+    assert!(node_dedup.contains("Already sent earlier in this conversation"), "{node_dedup}");
+    assert!(node_dedup.contains("noDedup: true"), "{node_dedup}");
+    assert!(node_dedup.contains("**Trail — codegraph-rust_node"), "{node_dedup}");
+
+    // 8. File `symbolsOnly` footer -> MCP `symbolsOnly` and `offset`/`limit`.
+    let file_syms = text_of(&rpc(9, "tools/call", json!({"name": "codegraph-rust_node", "arguments": {"file": "src/catalog.ts", "symbolsOnly": true}})));
+    assert!(file_syms.contains("Drop `symbolsOnly`"), "{file_syms}");
+    assert!(file_syms.contains("`offset`/`limit`"), "{file_syms}");
+
+    // 9. File pagination + dedup -> MCP `offset`/`limit`, `codegraph-rust_node <symbol>`, `noDedup: true`.
+    let file_page1 = text_of(&rpc(10, "tools/call", json!({"name": "codegraph-rust_node", "arguments": {"file": "src/catalog.ts", "limit": 25}})));
+    assert!(file_page1.contains("`offset`/`limit`") && file_page1.contains("codegraph-rust_node <symbol>"), "{file_page1}");
+    let file_page2 = text_of(&rpc(11, "tools/call", json!({"name": "codegraph-rust_node", "arguments": {"file": "src/catalog.ts", "limit": 25}})));
+    assert!(
+        file_page2.contains("Already sent earlier") && file_page2.contains("noDedup: true") && file_page2.contains("codegraph-rust_node <symbol>"),
+        "{file_page2}"
+    );
+
+    // 10. MCP callers widening (`limit`) + dedup (`noDedup: true`).
+    let callers1 = text_of(&rpc(12, "tools/call", json!({"name": "codegraph-rust_callers", "arguments": {"symbol": "computeDiscount", "limit": 3}})));
+    assert!(callers1.contains("pass `limit`"), "{callers1}");
+    let callers2 = text_of(&rpc(13, "tools/call", json!({"name": "codegraph-rust_callers", "arguments": {"symbol": "computeDiscount", "limit": 3}})));
+    assert!(callers2.contains("Already sent earlier") && callers2.contains("noDedup: true"), "{callers2}");
+
+    drop(stdin);
+    let status = child.wait().expect("wait cgr serve");
+    assert!(status.success(), "cgr serve exited cleanly");
+
+    // 11. Verify MCP JSONL telemetry `one_symbol` accuracy across all 12 tool calls.
+    let events = read_jsonl(&telem);
+    assert_eq!(events.len(), 12, "expected 12 MCP telemetry events: {events:?}");
+    assert!(events.iter().all(|e| e["mode"] == "mcp" && e["one_symbol"].is_boolean()), "{events:?}");
+    assert_eq!((events[0]["tool"].as_str(), events[0]["one_symbol"].as_bool()), (Some("explore"), Some(false)));
+    assert_eq!((events[1]["tool"].as_str(), events[1]["one_symbol"].as_bool()), (Some("explore"), Some(true)));
+    assert_eq!((events[2]["tool"].as_str(), events[2]["one_symbol"].as_bool()), (Some("explore"), Some(true)));
+    assert_eq!((events[3]["tool"].as_str(), events[3]["one_symbol"].as_bool()), (Some("explore"), Some(false)));
+    assert_eq!((events[4]["tool"].as_str(), events[4]["one_symbol"].as_bool()), (Some("explore"), Some(false)));
+    for ev in &events[5..] {
+        assert_ne!(ev["tool"], "explore", "expected non-explore tool: {ev:?}");
+        assert_eq!(ev["one_symbol"], false, "non-explore tools must record one_symbol=false: {ev:?}");
+    }
+}

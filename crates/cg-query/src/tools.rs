@@ -6,6 +6,7 @@ use crate::explore::{ExploreOptions, History, SentQuery};
 use crate::graph::Graph;
 use crate::search::SearchOptions;
 use crate::strings;
+pub use crate::strings::OutputMode;
 use cg_core::{EdgeKind, FileId, NodeIdx, NodeKind};
 use rustc_hash::FxHashMap;
 use serde_json::Value;
@@ -17,6 +18,7 @@ pub const MAX_OUTPUT_LENGTH: usize = 15_000;
 /// Per-call instrumentation emitted alongside tool text (used by opt-in telemetry).
 #[derive(Clone, Debug, Default)]
 pub struct ToolMeta {
+    pub one_symbol: bool,
     pub dedup_hits: u32,
     pub dedup_saved_bytes: usize,
     pub tail_idx_checked: bool,
@@ -47,6 +49,7 @@ impl ToolMeta {
     }
 
     pub fn merge(&mut self, other: &ToolMeta) {
+        self.one_symbol |= other.one_symbol;
         self.dedup_hits += other.dedup_hits;
         self.dedup_saved_bytes += other.dedup_saved_bytes;
         self.tail_idx_checked |= other.tail_idx_checked;
@@ -95,6 +98,7 @@ pub struct ToolEnv<'a> {
     pub graph: &'a Graph,
     pub history: Option<Arc<Mutex<History>>>,
     pub status: StatusInfo,
+    pub mode: OutputMode,
 }
 
 fn clamp(v: f64, lo: f64, hi: f64) -> usize {
@@ -161,6 +165,7 @@ fn handle_explore(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
         max_output: num_arg(args, "maxChars").map(|n| clamp(n, 1_000.0, 50_000.0)),
         compact: bool_arg(args, "compact", false),
         history: if no_dedup { None } else { env.history.clone() },
+        mode: env.mode,
     };
     let r = env.graph.explore(query, &opts);
     ToolOutput::ok_with_meta(r.text, r.meta)
@@ -278,7 +283,7 @@ fn stale_banner_for_files(g: &Graph, files: impl IntoIterator<Item = FileId>) ->
     format!("{}\n\n", strings::stale_banner(&stale))
 }
 
-pub(crate) fn format_unresolved_hint(g: &Graph, subject: &str, what: &str, summary: &cg_store::UnresolvedRefSummary) -> String {
+pub(crate) fn format_unresolved_hint(g: &Graph, subject: &str, what: &str, summary: &cg_store::UnresolvedRefSummary, mode: OutputMode) -> String {
     let total = summary.total();
     if total == 0 {
         return String::new();
@@ -308,7 +313,10 @@ pub(crate) fn format_unresolved_hint(g: &Graph, subject: &str, what: &str, summa
     if total > summary.sites.len() {
         out.push_str(&format!("\n> - … (+{} more)", total - summary.sites.len()));
     }
-    out.push_str(&format!("\n> Tip: verify these dynamic/overload sites with targeted `rg -n \"{subject}\"` (or narrow with `file`)."));
+    out.push_str(&format!(
+        "\n> Tip: verify these dynamic/overload sites with targeted `rg -n \"{subject}\"` (or narrow with `{}`).",
+        mode.flag("file", "--file")
+    ));
     out
 }
 
@@ -420,6 +428,9 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
         (formatted, files)
     };
     let mut meta = ToolMeta::default();
+    let reuse_hint = strings::dedup_reuse_hint(env.mode);
+    let file_flag = env.mode.flag("file", "--file");
+    let limit_flag = env.mode.flag("limit", "--limit");
     if groups.len() == 1 {
         let (rows, files) = collect(&groups[0]);
         let stale = stale_banner_for_files(g, files);
@@ -428,7 +439,7 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
                 let guard = hist.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(prev) = guard.find_query(tool_name, &cache_key, env.status.generation) {
                     let subj = format!("{} (gen {})", prev.summary, env.status.generation);
-                    if let Some((notice, saved)) = crate::explore::dedup_notice(&subj, prev.bytes, "reuse or pass `noDedup: true`.") {
+                    if let Some((notice, saved)) = crate::explore::dedup_notice(&subj, prev.bytes, reuse_hint) {
                         meta.dedup_hits += 1;
                         meta.dedup_saved_bytes += saved;
                         return ToolOutput::ok_with_meta(notice, meta);
@@ -444,7 +455,7 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
                 unresolved_outgoing_for_defs(g, &groups[0], 5)
             };
             meta.record_tail_idx(&summary);
-            let hint = format_unresolved_hint(g, simple, what, &summary);
+            let hint = format_unresolved_hint(g, simple, what, &summary, env.mode);
             let hint_block = if hint.is_empty() { String::new() } else { format!("\n\n{hint}") };
             return ToolOutput::ok_with_meta(truncate_output_to(format!("{stale}No {what} found for \"{symbol}\"{hint_block}{filter_note}"), cap), meta);
         }
@@ -462,7 +473,8 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
             String::new()
         };
         let total_rows = rows.len();
-        let cut = if total_rows > limit { format!("\n\n> Showing {limit} of {total_rows} {what}; pass `limit` (up to 100) to widen.") } else { String::new() };
+        let cut =
+            if total_rows > limit { format!("\n\n> Showing {limit} of {total_rows} {what}; pass `{limit_flag}` (up to 100) to widen.") } else { String::new() };
         let header = format!("**{title} {symbol} ({} found)**", total_rows.min(limit));
         let mut lines = vec![header.clone(), String::new()];
         lines.extend(rows.into_iter().take(limit));
@@ -472,7 +484,7 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
         if stale.is_empty() && !truncated {
             let summary = header.trim_matches('*').to_owned();
             let subj = format!("{summary} (gen {})", env.status.generation);
-            if crate::explore::dedup_notice(&subj, out_text.len(), "reuse or pass `noDedup: true`.").is_some() {
+            if crate::explore::dedup_notice(&subj, out_text.len(), reuse_hint).is_some() {
                 if let Some(hist) = &env.history {
                     hist.lock().unwrap_or_else(|e| e.into_inner()).record_query(SentQuery {
                         tool: tool_name.to_owned(),
@@ -488,7 +500,7 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
     }
     let mut touched: Vec<FileId> = Vec::new();
     let mut any_rows = false;
-    let header = format!("**{title} {symbol} — {} distinct definitions (narrow with `file`)**", groups.len());
+    let header = format!("**{title} {symbol} — {} distinct definitions (narrow with `{file_flag}`)**", groups.len());
     let mut lines = vec![header.clone()];
     for grp in &groups {
         let head = grp[0];
@@ -501,7 +513,7 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
             if !callers {
                 let summary = unresolved_outgoing_for_defs(g, grp, 3);
                 meta.record_tail_idx(&summary);
-                let hint = format_unresolved_hint(g, g.name(head), what, &summary);
+                let hint = format_unresolved_hint(g, g.name(head), what, &summary, env.mode);
                 if !hint.is_empty() {
                     lines.push(hint);
                 }
@@ -512,7 +524,7 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
         let total = rows.len();
         lines.extend(rows.into_iter().take(limit));
         if total > limit {
-            lines.push(format!("- … +{} more (pass `limit` to widen)", total - limit));
+            lines.push(format!("- … +{} more (pass `{limit_flag}` to widen)", total - limit));
         }
     }
     let stale = stale_banner_for_files(g, touched);
@@ -521,7 +533,7 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
             let guard = hist.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(prev) = guard.find_query(tool_name, &cache_key, env.status.generation) {
                 let subj = format!("{} (gen {})", prev.summary, env.status.generation);
-                if let Some((notice, saved)) = crate::explore::dedup_notice(&subj, prev.bytes, "reuse or pass `noDedup: true`.") {
+                if let Some((notice, saved)) = crate::explore::dedup_notice(&subj, prev.bytes, reuse_hint) {
                     meta.dedup_hits += 1;
                     meta.dedup_saved_bytes += saved;
                     return ToolOutput::ok_with_meta(notice, meta);
@@ -533,7 +545,7 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
         let simple = g.name(groups[0][0]);
         let summary = g.view.unresolved_refs_by_tail(simple, cg_store::UnresolvedScope::CallLike, 5);
         meta.record_tail_idx(&summary);
-        let hint = format_unresolved_hint(g, simple, what, &summary);
+        let hint = format_unresolved_hint(g, simple, what, &summary, env.mode);
         if hint.is_empty() {
             String::new()
         } else {
@@ -548,7 +560,7 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
     if stale.is_empty() && !truncated && any_rows {
         let summary = header.trim_matches('*').to_owned();
         let subj = format!("{summary} (gen {})", env.status.generation);
-        if crate::explore::dedup_notice(&subj, out_text.len(), "reuse or pass `noDedup: true`.").is_some() {
+        if crate::explore::dedup_notice(&subj, out_text.len(), reuse_hint).is_some() {
             if let Some(hist) = &env.history {
                 hist.lock().unwrap_or_else(|e| e.into_inner()).record_query(SentQuery {
                     tool: tool_name.to_owned(),
@@ -563,7 +575,7 @@ fn handle_callers(env: &ToolEnv<'_>, args: &Value, callers: bool) -> ToolOutput 
     ToolOutput::ok_with_meta(out_text, meta)
 }
 
-fn format_impact(g: &Graph, label: &str, root: NodeIdx, imp: &crate::traverse::Impact) -> String {
+fn format_impact(g: &Graph, label: &str, root: NodeIdx, imp: &crate::traverse::Impact, mode: OutputMode) -> String {
     let mut nodes: Vec<NodeIdx> = vec![root];
     nodes.extend(imp.nodes.iter().map(|x| x.0));
     let mut lines = vec![
@@ -571,7 +583,7 @@ fn format_impact(g: &Graph, label: &str, root: NodeIdx, imp: &crate::traverse::I
         String::new(),
     ];
     if imp.truncated {
-        lines.push("> Result truncated to protect the MCP process on a high-fanout graph. Narrow with `file` or reduce `depth`.".into());
+        lines.push(strings::impact_truncated_note(mode).into());
         lines.push(String::new());
     }
     let mut by_file: Vec<(String, Vec<NodeIdx>)> = Vec::new();
@@ -616,7 +628,7 @@ fn handle_impact(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
             let simple = g.name(root);
             let summary = g.view.unresolved_refs_by_tail(simple, cg_store::UnresolvedScope::Dependency, 5);
             meta.record_tail_idx(&summary);
-            let hint = format_unresolved_hint(g, simple, "dependents", &summary);
+            let hint = format_unresolved_hint(g, simple, "dependents", &summary, env.mode);
             if hint.is_empty() {
                 String::new()
             } else {
@@ -635,11 +647,12 @@ fn handle_impact(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
         } else {
             String::new()
         };
-        return ToolOutput::ok_with_meta(truncate_output_to(stale + &format_impact(g, symbol, root, &imp) + &hint_block + &filter_note, cap), meta);
+        return ToolOutput::ok_with_meta(truncate_output_to(stale + &format_impact(g, symbol, root, &imp, env.mode) + &hint_block + &filter_note, cap), meta);
     }
     let mut touched: Vec<FileId> = Vec::new();
     let mut any_dependents = false;
-    let mut lines = vec![format!("**Impact of {symbol} — {} distinct definitions (each with its own blast radius; narrow with `file`)**", groups.len())];
+    let file_flag = env.mode.flag("file", "--file");
+    let mut lines = vec![format!("**Impact of {symbol} — {} distinct definitions (each with its own blast radius; narrow with `{file_flag}`)**", groups.len())];
     for grp in groups.iter().take(12) {
         let root = grp[0];
         let imp = g.impact(root, depth, 5_000);
@@ -647,13 +660,13 @@ fn handle_impact(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
         touched.push(g.view.hot(root).file);
         touched.extend(imp.nodes.iter().map(|(n, _)| g.view.hot(*n).file));
         lines.push(String::new());
-        lines.push(format_impact(g, &format!("{} ({}:{})", g.qname(root), g.node_path(root), g.line(root)), root, &imp));
+        lines.push(format_impact(g, &format!("{} ({}:{})", g.qname(root), g.node_path(root), g.line(root)), root, &imp, env.mode));
     }
     let hint_block = if !any_dependents {
         let simple = g.name(groups[0][0]);
         let summary = g.view.unresolved_refs_by_tail(simple, cg_store::UnresolvedScope::Dependency, 5);
         meta.record_tail_idx(&summary);
-        let hint = format_unresolved_hint(g, simple, "dependents", &summary);
+        let hint = format_unresolved_hint(g, simple, "dependents", &summary, env.mode);
         if hint.is_empty() {
             String::new()
         } else {
@@ -716,13 +729,13 @@ fn handle_implementations(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
     }
     if groups.len() > CAP {
         lines.push(String::new());
-        lines.push(format!("> … +{} more definitions of \"{symbol}\" (narrow with `file`).", groups.len() - CAP));
+        lines.push(format!("> … +{} more definitions of \"{symbol}\" (narrow with `{}`).", groups.len() - CAP, env.mode.flag("file", "--file")));
     }
     let hint_block = if !any_impls {
         let simple = g.name(groups[0][0]);
         let summary = g.view.unresolved_refs_by_tail(simple, cg_store::UnresolvedScope::Dependency, 5);
         meta.record_tail_idx(&summary);
-        let hint = format_unresolved_hint(g, simple, "implementations", &summary);
+        let hint = format_unresolved_hint(g, simple, "implementations", &summary, env.mode);
         if hint.is_empty() {
             String::new()
         } else {
@@ -780,7 +793,10 @@ fn handle_node(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
     }
     if symbol.is_none() {
         let Some(file) = file_hint else {
-            return ToolOutput::err("Error: pass `symbol`, or `file` to read a file");
+            return ToolOutput::err(match env.mode {
+                OutputMode::Mcp => "Error: pass `symbol`, or `file` to read a file",
+                OutputMode::Cli => "Error: pass a symbol or file path",
+            });
         };
         let opts = FileViewOpts {
             offset: num_arg(args, "offset").filter(|n| *n > 0.0).map(|n| n as usize),
@@ -788,6 +804,7 @@ fn handle_node(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
             symbols_only: bool_arg(args, "symbolsOnly", false) || compact,
             max_chars: num_arg(args, "maxChars").map(|n| clamp(n, 500.0, 100_000.0)),
             no_dedup,
+            mode: env.mode,
         };
         return file_view(g, file, opts, env.history.as_ref());
     }
@@ -835,7 +852,7 @@ fn handle_node(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
         if idx > 0 {
             running_len += 7; // "\n\n---\n\n"
         }
-        let (sec, sent) = node_section(g, *n, effective_code, active_history, &mut meta);
+        let (sec, sent) = node_section(g, *n, effective_code, active_history, env.mode, &mut meta);
         running_len += sec.len();
         if let Some(s) = sent {
             pending_sent.push((running_len, s));
@@ -843,7 +860,7 @@ fn handle_node(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
         sections.push(sec);
     }
     if matches.len() > CAP {
-        sections.push(format!("> … +{} more definitions of \"{symbol}\" (narrow with `file`).", matches.len() - shown));
+        sections.push(format!("> … +{} more definitions of \"{symbol}\" (narrow with `{}`).", matches.len() - shown, env.mode.flag("file", "--file")));
     }
     let cap = cap_arg(args);
     let joined = sections.join("\n\n---\n\n");
@@ -865,7 +882,14 @@ fn handle_node(env: &ToolEnv<'_>, args: &Value) -> ToolOutput {
     ToolOutput::ok_with_meta(out_text, meta)
 }
 
-fn node_section(g: &Graph, n: NodeIdx, include_code: bool, history: Option<&Arc<Mutex<History>>>, meta: &mut ToolMeta) -> (String, Option<SentSpan>) {
+fn node_section(
+    g: &Graph,
+    n: NodeIdx,
+    include_code: bool,
+    history: Option<&Arc<Mutex<History>>>,
+    mode: OutputMode,
+    meta: &mut ToolMeta,
+) -> (String, Option<SentSpan>) {
     let node = g.view.node(n);
     let kind = g.kind(n);
     let mut sent_span: Option<SentSpan> = None;
@@ -901,11 +925,7 @@ fn node_section(g: &Graph, n: NodeIdx, include_code: bool, history: Option<&Arc<
                     lines.push(format!("- {} ({}):{}{sig}", g.name(*m), g.kind(*m), g.line(*m)));
                 }
                 lines.push(String::new());
-                lines.push(format!(
-                    "> Structural outline only. Read `{}` or call {} on a specific member for its body.",
-                    g.node_path(n),
-                    strings::tool("node")
-                ));
+                lines.push(strings::container_outline_note(mode, g.node_path(n)));
             }
         } else if let Ok(src) = g.view.read_source(f) {
             let (s, e) = (g.line(n) as usize, g.end_line(n).max(g.line(n)) as usize);
@@ -916,9 +936,8 @@ fn node_section(g: &Graph, n: NodeIdx, include_code: bool, history: Option<&Arc<
                 let path = g.node_path(n);
                 let fp = g.fingerprint(f);
                 let covered = history.is_some_and(|h| h.lock().unwrap_or_else(|err| err.into_inner()).is_covered(path, fp, s as u32, e as u32));
-                if let Some((notice, saved)) = covered
-                    .then(|| crate::explore::dedup_notice(&format!("lines {s}-{e} of `{path}`"), fenced.len(), "use that copy or pass `noDedup: true`."))
-                    .flatten()
+                if let Some((notice, saved)) =
+                    covered.then(|| crate::explore::dedup_notice(&format!("lines {s}-{e} of `{path}`"), fenced.len(), strings::dedup_copy_hint(mode))).flatten()
                 {
                     meta.dedup_hits += 1;
                     meta.dedup_saved_bytes += saved;
@@ -939,7 +958,7 @@ fn node_section(g: &Graph, n: NodeIdx, include_code: bool, history: Option<&Arc<
     let callers = g.callers(n, 1, 200);
     if !callees.is_empty() || !callers.is_empty() {
         lines.push(String::new());
-        lines.push(format!("**Trail — {} any of these to follow it (no Read needed)**", strings::tool("node")));
+        lines.push(strings::node_trail_header(mode));
         let fmt = |r: &crate::traverse::Related, sites: bool| -> String {
             let at = if sites && !r.lines.is_empty() { format_lines(&r.lines, 3) } else { g.line(r.node).to_string() };
             let base = format!("{} ({}:{at})", g.name(r.node), g.node_path(r.node));
@@ -969,7 +988,7 @@ fn node_section(g: &Graph, n: NodeIdx, include_code: bool, history: Option<&Arc<
         if callers.is_empty() {
             let summary = g.view.unresolved_refs_by_tail(g.name(n), cg_store::UnresolvedScope::CallLike, 5);
             meta.record_tail_idx(&summary);
-            let hint = format_unresolved_hint(g, g.name(n), "callers", &summary);
+            let hint = format_unresolved_hint(g, g.name(n), "callers", &summary, mode);
             if !hint.is_empty() {
                 lines.push(String::new());
                 lines.push(hint);
@@ -978,7 +997,7 @@ fn node_section(g: &Graph, n: NodeIdx, include_code: bool, history: Option<&Arc<
         if callees.is_empty() {
             let summary = unresolved_outgoing_for_defs(g, &[n], 5);
             meta.record_tail_idx(&summary);
-            let hint = format_unresolved_hint(g, g.name(n), "callees", &summary);
+            let hint = format_unresolved_hint(g, g.name(n), "callees", &summary, mode);
             if !hint.is_empty() {
                 lines.push(String::new());
                 lines.push(hint);
@@ -994,6 +1013,7 @@ struct FileViewOpts {
     symbols_only: bool,
     max_chars: Option<usize>,
     no_dedup: bool,
+    mode: OutputMode,
 }
 
 fn file_view(g: &Graph, file_arg: &str, mut opts: FileViewOpts, history: Option<&Arc<Mutex<History>>>) -> ToolOutput {
@@ -1072,7 +1092,7 @@ fn file_view(g: &Graph, file_arg: &str, mut opts: FileViewOpts, history: Option<
             out.extend(symbol_map("**Symbols**"));
         }
         out.push(String::new());
-        out.push("> Drop `symbolsOnly` (or pass `offset`/`limit`) to read the source, like Read.".into());
+        out.push(strings::symbols_only_footer(opts.mode).into());
         return ToolOutput::ok(truncate_output_to(out.join("\n"), opts.max_chars.unwrap_or(MAX_OUTPUT_LENGTH)));
     }
     let Some(abs) = g.abs_path(&path) else {
@@ -1136,9 +1156,7 @@ fn file_view(g: &Graph, file_arg: &str, mut opts: FileViewOpts, history: Option<
                 let covered = guard.is_covered(&path, fp, offset as u32, shown_end as u32);
                 let body_bytes: usize = numbered.iter().map(|l| l.len() + 1).sum();
                 if let Some((notice, saved)) = covered
-                    .then(|| {
-                        crate::explore::dedup_notice(&format!("lines {offset}-{shown_end} of `{path}`"), body_bytes, "use that copy or pass `noDedup: true`.")
-                    })
+                    .then(|| crate::explore::dedup_notice(&format!("lines {offset}-{shown_end} of `{path}`"), body_bytes, strings::dedup_copy_hint(opts.mode)))
                     .flatten()
                 {
                     meta.dedup_hits += 1;
@@ -1146,10 +1164,7 @@ fn file_view(g: &Graph, file_arg: &str, mut opts: FileViewOpts, history: Option<
                     let mut out = vec![header, String::new(), notice];
                     if !complete {
                         out.push(String::new());
-                        out.push(format!(
-                            "(lines {offset}–{shown_end} of {total} — pass `offset`/`limit` for another range, or `{} <symbol>` for one symbol in full)",
-                            strings::tool("node")
-                        ));
+                        out.push(strings::file_view_range_footer(opts.mode, offset, shown_end, total, false));
                     }
                     return ToolOutput::ok_with_meta(out.join("\n"), meta);
                 }
@@ -1163,11 +1178,7 @@ fn file_view(g: &Graph, file_arg: &str, mut opts: FileViewOpts, history: Option<
     out.extend(numbered);
     if !complete {
         out.push(String::new());
-        out.push(format!(
-            "(lines {offset}–{shown_end} of {total}{} — pass `offset`/`limit` for another range, or `{} <symbol>` for one symbol in full)",
-            if line_clipped { ", partial line" } else { "" },
-            strings::tool("node")
-        ));
+        out.push(strings::file_view_range_footer(opts.mode, offset, shown_end, total, line_clipped));
     }
     ToolOutput::ok_with_meta(out.join("\n"), meta)
 }

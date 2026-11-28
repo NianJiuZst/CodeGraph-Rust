@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/NianJiuZst/CodeGraph-Rust/main/scripts/install.sh | sh -s -- --skill
 #
 # Environment:
-#   CGR_VERSION        version to install, e.g. 0.3.1 (default: the latest release)
+#   CGR_VERSION        version to install, e.g. 0.3.2 (default: the latest release)
 #   CGR_INSTALL_DIR    where the binary goes (default: $HOME/.local/bin)
 #   CGR_INSTALL_SKILL  set to 1 to also install the official SKILL.md (same as --skill)
 #   CGR_BASE_URL       release download base URL (default: the GitHub releases of this repository);

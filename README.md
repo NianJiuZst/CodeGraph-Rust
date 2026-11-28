@@ -586,8 +586,8 @@ appropriate for the clients that should access the project's source.
 
 For coding agents that load `SKILL.md` playbooks (Claude Code, Codex, Antigravity, Cursor, OpenCode)
 without running a persistent MCP server, this repository ships a ready-to-use skill at
-[`skills/codegraph-rust/SKILL.md`](skills/codegraph-rust/SKILL.md) covering compact map-first exploration
-(`cgr explore --compact --max-chars 6000 --max-files 6`), bounded multi-symbol queries (`cgr node --code --max-chars 8000`),
+[`skills/codegraph-rust/SKILL.md`](skills/codegraph-rust/SKILL.md) covering optimistic Turn-1 routing
+(compact maps via `cgr explore --compact --max-chars 5000 --max-files 6`, focused single-symbol lookup via `cgr explore "<Sym>" --max-chars 6000`), bounded multi-symbol queries (`cgr node --code --max-chars 6000`),
 inline `--sync`, `CGR_SESSION` deduplication, `tail_idx` dynamic-dispatch fallback, and disciplined narrow verification.
 
 ```sh
@@ -653,7 +653,7 @@ flags for downstream ranking and analysis.
 | `CGR_DEDUP=1` / `CGR_EXPLORE_DEDUP=1` | Share session-level deduplication across `explore`, `node`, `callers`, and `callees` in MCP (also `--dedup`) |
 | `CGR_SESSION` | Session ID for persistent cross-call CLI deduplication across `explore`, `node`, `callers`, and `callees` (`.cgr/sessions/`) |
 | `CGR_AUTO_SYNC` | `1` enables pre-query incremental sync on CLI; `0` disables default pre-query sync in `cgr serve` |
-| `CGR_TELEMETRY_LOG` | Optional JSONL file path recording per-call latency, sync, dedup savings, and `tail_idx` counters (dormant when unset) |
+| `CGR_TELEMETRY_LOG` | Optional JSONL file path recording per-call latency, sync, `one_symbol` hits, dedup savings, and `tail_idx` counters (dormant when unset) |
 | `CGR_NO_PROMPT_HOOK=1` | Disable the optional Claude Code prompt hook at runtime |
 | `CGR_HTTP_TOKEN` | Require a bearer token on HTTP requests |
 | `CGR_LOG` | Service log filter, default `warn`; logs go to stderr |

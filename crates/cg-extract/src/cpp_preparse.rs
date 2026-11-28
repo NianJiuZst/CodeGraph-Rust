@@ -869,7 +869,7 @@ fn closes_parameter_list(c: &[u8], close: usize) -> bool {
     }
     NAME_TAIL.captures(before).and_then(|m| m.get(1)).is_some_and(|name| {
         let name = name.as_bytes();
-        !PAREN_KEYWORDS.contains(&name) && !caps_end(name, 0).is_some_and(|e| e == name.len())
+        !PAREN_KEYWORDS.contains(&name) && caps_end(name, 0) != Some(name.len())
     })
 }
 

@@ -4,7 +4,7 @@
 use anyhow::{anyhow, Context, Result};
 use cg_core::{brand, FileId, NodeIdx};
 use cg_query::explore::History;
-use cg_query::tools::{self, ToolEnv};
+use cg_query::tools::{self, OutputMode, ToolEnv};
 use cg_query::Project;
 use cg_store::dump;
 use serde_json::json;
@@ -145,7 +145,7 @@ fn call_proj(proj: &Project, tool: &str, args: serde_json::Value, history: Optio
     let dedup_enabled = history.is_some() && !args.get("noDedup").and_then(|v| v.as_bool()).unwrap_or(false);
     let status = proj.status_info();
     let gen = status.generation;
-    let env = ToolEnv { graph: &proj.graph, history, status };
+    let env = ToolEnv { graph: &proj.graph, history, status, mode: OutputMode::Cli };
     let out = tools::call(&env, tool, &args);
     println!("{}", out.text);
     cg_query::telemetry::record(cg_query::telemetry::CallStats {
@@ -382,7 +382,7 @@ pub fn node(ctx: &QueryCtx, targets: &[String], opts: NodeArgs) -> Result<i32> {
     let (history, sess_file) = load_session(ctx, proj.root(), opts.no_dedup);
     let status = proj.status_info();
     let gen = status.generation;
-    let env = ToolEnv { graph: &proj.graph, history: history.clone(), status };
+    let env = ToolEnv { graph: &proj.graph, history: history.clone(), status, mode: OutputMode::Cli };
     let mut parts: Vec<String> = Vec::with_capacity(targets.len());
     let mut any_err = false;
     let mut meta = cg_query::tools::ToolMeta::default();
@@ -483,7 +483,7 @@ pub fn callers(ctx: &QueryCtx, symbols: &[String], file: Option<String>, limit: 
     let (history, sess_file) = load_session(ctx, proj.root(), no_dedup);
     let status = proj.status_info();
     let gen = status.generation;
-    let env = ToolEnv { graph: &proj.graph, history: history.clone(), status };
+    let env = ToolEnv { graph: &proj.graph, history: history.clone(), status, mode: OutputMode::Cli };
     let tool = if callers { "callers" } else { "callees" };
     let mut parts: Vec<String> = Vec::with_capacity(symbols.len());
     let mut any_err = false;
@@ -542,7 +542,7 @@ pub fn impact(ctx: &QueryCtx, symbols: &[String], file: Option<String>, depth: u
     let (proj, sync_stat) = open_for_query(ctx.base.clone(), ctx.sync)?;
     let status = proj.status_info();
     let gen = status.generation;
-    let env = ToolEnv { graph: &proj.graph, history: None, status };
+    let env = ToolEnv { graph: &proj.graph, history: None, status, mode: OutputMode::Cli };
     let mut parts: Vec<String> = Vec::with_capacity(symbols.len());
     let mut any_err = false;
     let mut meta = cg_query::tools::ToolMeta::default();
@@ -599,7 +599,7 @@ pub fn implementations(ctx: &QueryCtx, symbols: &[String], file: Option<String>,
     let (proj, sync_stat) = open_for_query(ctx.base.clone(), ctx.sync)?;
     let status = proj.status_info();
     let gen = status.generation;
-    let env = ToolEnv { graph: &proj.graph, history: None, status };
+    let env = ToolEnv { graph: &proj.graph, history: None, status, mode: OutputMode::Cli };
     let mut parts: Vec<String> = Vec::with_capacity(symbols.len());
     let mut any_err = false;
     let mut meta = cg_query::tools::ToolMeta::default();
