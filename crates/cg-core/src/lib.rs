@@ -12,6 +12,7 @@ pub mod fileflags;
 pub mod hash;
 pub mod ids;
 pub mod kinds;
+pub mod path;
 pub mod text;
 
 pub use error::{CgError, Result};

@@ -100,7 +100,7 @@ impl Rng {
 
 fn project_root(path: Option<PathBuf>) -> Result<PathBuf> {
     let p = path.unwrap_or_else(|| PathBuf::from("."));
-    p.canonicalize().with_context(|| format!("cannot open {}", p.display()))
+    cg_core::path::canonicalize(&p).with_context(|| format!("cannot open {}", p.display()))
 }
 
 // ---------------------------------------------------------------- queries
