@@ -326,6 +326,14 @@ impl Server {
         ToolOutput::ok(text)
     }
 
+    fn locate_store(start: &Path) -> Option<Store> {
+        let normalized = cg_core::path::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
+        Store::locate(&normalized).map(|s| {
+            let root = cg_core::path::canonicalize(&s.root).unwrap_or(s.root);
+            Store::at(&root)
+        })
+    }
+
     /// Open (or refresh) the project for a tool call.
     fn project_for(&self, project_path: Option<&str>) -> Result<ProjectHandles, ToolOutput> {
         let default = self.default_root();
@@ -336,7 +344,7 @@ impl Server {
             }
             None => (default, false),
         };
-        let Some(store) = Store::locate(&start) else { return Err(self.guidance(&start, explicit)) };
+        let Some(store) = Self::locate_store(&start) else { return Err(self.guidance(&start, explicit)) };
         let root = store.root.clone();
         // Keep open/evict callbacks in cache mutation order. Otherwise a later eviction
         // could stop a watcher before an earlier open callback has actually started it.
@@ -463,7 +471,7 @@ impl Server {
                     }
                     None => default,
                 };
-                if let Some(store) = Store::locate(&start) {
+                if let Some(store) = Self::locate_store(&start) {
                     sync_checked = true;
                     sync_res = hook(&store.root, is_explicit_sync);
                 }
@@ -517,7 +525,7 @@ impl Server {
     // --------------------------------------------------------------- dispatch
     fn instructions(&self) -> String {
         let root = self.default_root();
-        if Store::locate(&root).is_some() {
+        if Self::locate_store(&root).is_some() {
             strings::server_instructions()
         } else {
             strings::server_instructions_no_root_index()

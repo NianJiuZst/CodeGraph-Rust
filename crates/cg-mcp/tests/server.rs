@@ -277,3 +277,48 @@ fn explore_compact_max_chars_and_session_dedup() {
     assert!(!t10.contains("Already sent earlier"), "{t10}");
     server.shutdown();
 }
+
+#[test]
+fn alternate_path_spellings_share_cache_watcher_and_dedup_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("greet.ts"),
+        "export function greet(name: string): string {\n  const normalized = name.trim();\n  const prefix = 'hello';\n  return `${prefix} ${normalized}`;\n}\n",
+    )
+    .unwrap();
+    cg_resolve::index_project(dir.path(), &Default::default()).unwrap();
+
+    // Intentionally seed `Config::path` with raw `std::fs::canonicalize` (which carries `\\?\` on Windows).
+    let raw_canon = std::fs::canonicalize(dir.path()).unwrap();
+    let server = Server::new(Config { path: Some(raw_canon), tools: Some(vec!["explore".into()]), dedup: true, auto_sync: false });
+    let open_roots = Arc::new(std::sync::Mutex::new(Vec::<std::path::PathBuf>::new()));
+    let opened = open_roots.clone();
+    server.set_open_hook(Arc::new(move |root| {
+        opened.lock().unwrap().push(root.to_path_buf());
+    }));
+    let out = Arc::new(Collect::default());
+    server.set_outbound(out.clone());
+
+    call(&server, &out, 1, "codegraph-rust_explore", json!({"query": "greet"}));
+    server.drain(Duration::from_secs(20));
+    let t1 = text_of(&out.by_id(1).unwrap());
+    assert!(t1.contains("const normalized = name.trim();"), "{t1}");
+
+    // Query the same project through a non-canonical spelling (`src/..`, and normal non-verbatim path on Windows).
+    let alt_path = dir.path().join("src").join("..");
+    call(&server, &out, 2, "codegraph-rust_explore", json!({"query": "greet", "projectPath": alt_path.to_string_lossy()}));
+    server.drain(Duration::from_secs(20));
+    let t2 = text_of(&out.by_id(2).unwrap());
+    assert!(t2.contains("Already sent earlier in this conversation"), "expected shared dedup history across path spellings: {t2}");
+    let opened = open_roots.lock().unwrap();
+    assert_eq!(opened.len(), 1, "same project must not open duplicate cache/watcher entries");
+    #[cfg(windows)]
+    if let Some(s) = opened[0].to_str() {
+        if s.encode_utf16().count() < 260 {
+            assert!(!s.starts_with(r"\\?\"), "open_hook should receive clean Win32 path: {s}");
+        }
+    }
+    server.shutdown();
+}

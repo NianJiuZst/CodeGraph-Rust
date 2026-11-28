@@ -38,7 +38,7 @@ pub struct NodeArgs {
 
 fn start_dir(p: Option<PathBuf>) -> Result<PathBuf> {
     let p = p.unwrap_or_else(|| PathBuf::from("."));
-    p.canonicalize().with_context(|| format!("cannot open {}", p.display()))
+    cg_core::path::canonicalize(&p).with_context(|| format!("cannot open {}", p.display()))
 }
 
 fn open(p: Option<PathBuf>) -> Result<Project> {
@@ -841,7 +841,7 @@ pub fn serve(base: Option<PathBuf>, http: Option<String>, token: Option<String>,
         dedup = false;
     }
     let auto_sync = !no_auto_sync && !env_falsy(brand::env::AUTO_SYNC);
-    let cfg_path = base.map(|p| p.canonicalize().unwrap_or(p));
+    let cfg_path = base.map(|p| cg_core::path::canonicalize(&p).unwrap_or(p));
     let cfg = cg_mcp::Config { path: cfg_path.clone(), tools: cg_mcp::defs::allowlist_from_env(), dedup, auto_sync };
     let server = cg_mcp::Server::new(cfg);
     server.set_rebuild_hook(std::sync::Arc::new(|root: &Path| {
@@ -914,14 +914,14 @@ pub fn install(
     use cg_install::{targets, Action, Env, Request};
     let env = Env::from_process();
     let project = match base {
-        Some(p) => p.canonicalize().unwrap_or(p),
+        Some(p) => cg_core::path::canonicalize(&p).unwrap_or(p),
         None => env.cwd.clone(),
     };
     let bin = match bin {
         Some(b) => b,
         None => std::env::current_exe()
             .ok()
-            .and_then(|p| p.canonicalize().ok())
+            .and_then(|p| cg_core::path::canonicalize(&p).ok())
             .ok_or_else(|| anyhow!("cannot determine the path of this executable; pass --bin"))?,
     };
     let req = Request { bin, local, project, hook, permissions, dry_run };
